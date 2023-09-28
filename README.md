@@ -1,4 +1,4 @@
 # SpotDIPy
-The easy way to stellar Doppler Imaging
+The easy way for stellar Doppler Imaging
 
 Coming soon!
