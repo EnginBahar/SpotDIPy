@@ -11,7 +11,7 @@ from astropy import units as au
 import PyDynamic as PyD
 
 
-DIP = SpotDIPy(processes=multiprocessing.cpu_count())  # - 2)
+DIP = SpotDIPy(processes=multiprocessing.cpu_count() - 1)
 
 DIP.set_param('t0', 2453200.00)
 DIP.set_param('period', 1.756604)
