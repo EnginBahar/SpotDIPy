@@ -49,7 +49,6 @@ DIP.set_local_profiles(llp_vels=llp_vels, llps={'phot': llp_phot_int, 'spot': ll
 
 
 """ Make a test """
-
 lats_spots = [0., 30., 60., 90., -30.]  # spot latitudes (degrees)
 longs_spots = [0., 90., 180., 270., 270.]  # spot longitudes (degrees)
 rs_spots = [20., 15., 20., 10., 15.]  # spot radius (degrees)
@@ -70,5 +69,4 @@ DIP.test(times=mid_times, line_vels=line_vels, line_snr=line_snr, opt_params=opt
                       'show_err_bars': True, 'fmt': '%0.3f', 'markersize': 2, 'linewidth': 1, 'fontsize': 15,
                       'ticklabelsize': 12}
          )
-
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
