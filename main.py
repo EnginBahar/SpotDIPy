@@ -13,7 +13,7 @@ DIP.set_param('Tspot', 3800)
 DIP.set_param('incl', 46)
 DIP.set_param('vsini', 21.5)
 DIP.set_param('vrt', 3.249)
-DIP.set_param('mass', 0.85)  # Folsom: 0.85
+DIP.set_param('mass', 0.85)
 DIP.set_param('gdc', 'auto')
 DIP.set_param('rv_corr_line', 0.0)
 DIP.set_param('resolution', 85000)
