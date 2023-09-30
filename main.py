@@ -1,14 +1,7 @@
-import sys
-
-import matplotlib.pyplot as plt
-
 from SpotDIPy import SpotDIPy
 import numpy as np
 import multiprocessing
 from glob import glob
-from astropy import constants as ac
-from astropy import units as au
-import PyDynamic as PyD
 
 
 DIP = SpotDIPy(processes=multiprocessing.cpu_count() - 1)
@@ -39,16 +32,16 @@ DIP.construct_surface_grid(method='trapezoid', nlats=40)  # , test=True)
 
 """ Set limb darkening parameters """
 DIP.set_limb_darkening_params(law='linear', mh=-0.138, ld_model='mps2',
-                              ld_data_path='/media/eng/Storage/ExoTiC-LD_data_v3.1.2', mu_min=0.1)
+                              ld_data_path='ExoTiC-LD_data_v3.1.2', mu_min=0.1)
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 
 """ Import initial local line profiles (LLP) (for photosphere and spot) data"""
-llp_vels = np.loadtxt('/home/eng/Dropbox/PycharmProjects/PWAnd_revise/synths/lsds/spectrum_5082_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
+llp_vels = np.loadtxt('synths/lsds/spectrum_5082_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
                       skiprows=2)[:, 0]
-llp_phot_int = np.loadtxt('/home/eng/Dropbox/PycharmProjects/PWAnd_revise/synths/lsds/spectrum_5082_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
+llp_phot_int = np.loadtxt('synths/lsds/spectrum_5082_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
                           skiprows=2)[:, 1]
-llp_spot_int = np.loadtxt('/home/eng/Dropbox/PycharmProjects/PWAnd_revise/synths/lsds/spectrum_3800_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
+llp_spot_int = np.loadtxt('synths/lsds/spectrum_3800_4.4_-0.138_0.055_1.932_0.0_0.0_0.0_0-err_lsd.out',
                           skiprows=2)[:, 1]
 
 DIP.set_local_profiles(llp_vels=llp_vels, llps={'phot': llp_phot_int, 'spot': llp_spot_int} )
