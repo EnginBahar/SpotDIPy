@@ -1,10 +1,6 @@
 import pickle
-
 import matplotlib
 import matplotlib.pyplot as plt
-
-# matplotlib.use('Qt5Agg')
-
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 import numpy as np
