@@ -1,5 +1,5 @@
 # SpotDIPy
-The easy way for stellar Doppler Imaging
+An Easy Way for Stellar Doppler Imaging of Cool Single Stars.
 
 Coming soon!
 
