@@ -1,8 +1,7 @@
 # SpotDIPy
 An Easy Way for Stellar Doppler Imaging of Cool Single Stars.
 
-Coming soon!
-
+SpotDIPy has released a new version that generates surface brightness maps for single cool stars by simultaneously modeling both spectral and light curve data using a three-temperature approximation. Detailed information about the installation and usage of the code will be shared soon.
 
 ![line_profiles](https://github.com/EnginBahar/SpotDIPy/assets/122885382/494a6cab-acb8-4632-bce6-929c29c4c96f)
 
