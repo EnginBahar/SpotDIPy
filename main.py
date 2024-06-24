@@ -68,7 +68,7 @@ lats_spots = [0., 30., 60., -30.]  # spot latitudes (degrees)
 longs_spots = [0., 90., 180., 270.]  # spot longitudes (degrees)
 rs_spots = [20., 15., 20., 15.]  # spot radius (degrees)
 cs_cools = [0.8, 0.2, 0.5, 0.0]  # cool spot contrast between 0 and 1
-cs_hots = [0.0, 0.8, 0.2, 1.0]  # hot spot contrast between 0 and 1
+cs_hots = [0.0, 0.8, 0.0, 1.0]  # hot spot contrast between 0 and 1
 
 spots_params = {'lats_spots': lats_spots, 'longs_spots': longs_spots, 'rs_spots': rs_spots, 'cs_cools': cs_cools,
                 'cs_hots': cs_hots}
