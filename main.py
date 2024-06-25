@@ -3,7 +3,7 @@ from SpotDIPy import SpotDIPy
 import multiprocessing
 
 
-DIP = SpotDIPy(cpu_num=multiprocessing.cpu_count() - 1, platform_name='gpu')
+DIP = SpotDIPy(cpu_num=multiprocessing.cpu_count() - 1, platform_name='cpu')
 
 """ Set required parameters """
 DIP.set_param('t0', value=2449681.5)
