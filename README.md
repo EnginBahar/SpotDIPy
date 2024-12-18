@@ -273,7 +273,7 @@ If you use SpotDIPy in your research and publish a paper, please cite the follow
           adsnote = {Provided by the SAO/NASA Astrophysics Data System}
     }
 
-Your citation would be greatly appreciated and help support the development of this tool.
+Your citation would be greatly appreciated and help support the development of this code.
 
 [//]: # (<p align="center">)
 
