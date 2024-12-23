@@ -54,7 +54,7 @@ setup(
         "PyQt5-Qt!=5.15.14",
         "phoebe",
         "kneebow",
-        # "mayavi", setup.py ile kurulum için açılmalı
+        "mayavi",
         "traits",
         "traitsui",
         "vtk==9.3.0",
