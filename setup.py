@@ -3,6 +3,13 @@ from Cython.Build import cythonize
 import numpy as np
 
 
+def get_version():
+    version_file = os.path.join(os.path.dirname(__file__), "src/SpotDIPy", "version.py")
+    with open(version_file) as f:
+        globals_dict = {}
+        exec(f.read(), globals_dict)
+        return globals_dict["__version__"]
+
 extensions = [
     Extension(
         "SpotDIPy.cutils",
@@ -13,7 +20,7 @@ extensions = [
 
 setup(
     name="SpotDIPy",
-    version="0.0.5",
+    version=get_version(),
     author="Engin Bahar",
     author_email="enbahar@ankara.edu.tr",
     description="An Easy Way for Stellar Doppler Imaging of Cool Single Stars",
