@@ -1,4 +1,5 @@
 from .SpotDIPy import SpotDIPy
 from .utils import *
 from .plot_GUI import PlotGUI
-from .version import __version__
+
+__version__ = "0.0.5"
