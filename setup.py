@@ -1,3 +1,4 @@
+import os
 from setuptools import setup, find_packages, Extension
 from Cython.Build import cythonize
 import numpy as np
