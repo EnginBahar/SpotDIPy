@@ -9,10 +9,10 @@ from astropy import units as au, constants as ac
 import platform
 import copy
 from PyQt5 import QtWidgets
-# from . import utils as dipu
-import utils as dipu
-# from .plot_GUI import PlotGUI
-from plot_GUI import PlotGUI
+from . import utils as dipu
+# import utils as dipu
+from .plot_GUI import PlotGUI
+# from plot_GUI import PlotGUI
 from jax.scipy.stats import norm
 
 
