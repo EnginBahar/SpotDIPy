@@ -245,10 +245,15 @@ containing the synths_lsds, target_lc, and target_lsds directories. The content 
 
 
 # Help Improve SpotDIPy
+If you encounter any bugs, errors, or unexpected behavior in SpotDIPy, or if you have suggestions for improvements, I’d love to hear from you! Your feedback is invaluable in making the code more robust and efficient.
 
-If you discover any errors or bugs in the SpotDIPy code, or if you have any suggestions or questions,
-please don't hesitate to reach out to me. Your feedback on the code would be highly valuable and
-greatly appreciated. e-mail: enbahar@ankara.edu.tr
+Feel free to:
+
+- Report issues by opening a GitHub Issue.
+- Share your ideas or ask questions in the Discussions section.
+- Reach out via email at 📧 enbahar@ankara.edu.tr for direct inquiries.
+
+Your contributions and insights are greatly appreciated!
 
 # Citiation
 
