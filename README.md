@@ -257,7 +257,7 @@ Your contributions and insights are greatly appreciated!
 
 # Citiation
 
-If you use SpotDIPy in your research and publish a paper, please cite the following reference:
+If you use SpotDIPy in your research, please cite the following reference:
 
     @ARTICLE{2024ApJ...960...60B,
            author = {{Bahar}, Engin and {{\c{S}}enavc{\i}}, Hakan V. and {I{\c{s}}{\i}k}, Emre and {Hussain}, Gaitee A.~J. and {Kochukhov}, Oleg and {Montes}, David and {Xiang}, Yue},
