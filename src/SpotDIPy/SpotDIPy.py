@@ -934,9 +934,6 @@ class SpotDIPy:
         if self.force_lines_only_map:
             ftot += jnp.sum((jnp.hstack((fssc, fssh)) - self.lines_only_map) ** 2)
 
-        # lines_only_map = np.loadtxt("EKDra_only_line_fs.txt")
-        # ftot += jnp.sum((jnp.hstack((fssc, fssh)) - lines_only_map) ** 2)
-
         return ftot, (chisqs['line'], chisqs['mol1'], chisqs['mol2'], chisqs['lc'], alpha_line, beta_mol1, gamma_mol2,
                       delta_lc, total_weighted_chisq, mem, lmbd_mem, p_value)
 
