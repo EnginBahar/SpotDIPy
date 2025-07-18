@@ -54,7 +54,7 @@ setup(
         "PyQt5-Qt!=5.15.14",
         "phoebe",
         "kneebow",
-        "mayavi",
+        "mayavi==4.8.2",
         "traits",
         "traitsui",
         "vtk==9.3.0",
