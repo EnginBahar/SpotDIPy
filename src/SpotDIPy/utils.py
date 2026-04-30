@@ -1,5 +1,7 @@
+from exotic_ld import StellarLimbDarkening
 from functools import reduce
 from itertools import combinations
+import platform
 import numpy as np
 from astropy.coordinates import spherical_to_cartesian as ast_stc
 from astropy.coordinates import cartesian_to_spherical as ast_cts
@@ -8,29 +10,27 @@ from scipy.interpolate import interp1d, griddata
 from scipy.optimize import curve_fit, newton as sc_newton
 from scipy.special import roots_legendre
 from PyAstronomy import pyasl
-from exotic_ld import StellarLimbDarkening
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-import PyDynamic as PyD
+import pyvista as pv
+from uncertainties.unumpy import uarray as uc_uarray, nominal_values as uc_nominal, std_devs as uc_std
 import multiprocessing
 import tqdm
-from . import cutils
-# import cutils
+import jax
 
 
 try:
+    from . import cutils as cutils
+except ImportError:
+    import cutils as cutils
+
+if not platform.system() == "Windows":
     import healpy as hp
-except:
-    pass
 
-
-from PyQt5.QtWidgets import QApplication, QDesktopWidget
-app = QApplication([])
-screen_info = QDesktopWidget().screenGeometry()
-screen_width = screen_info.width()
+from screeninfo import get_monitors
+screen_width = get_monitors()[0].width
 px = 1 / plt.rcParams['figure.dpi']
 figsize = (screen_width * px / 3, screen_width * px / 3)
-app.exit()
 
 
 sol = ac.c.to(au.kilometer / au.second).value  # km/s
@@ -196,50 +196,6 @@ def td_surface_grid(container, omega, nlats, radius, mass, cpu_num=1):
     container['grid_loggs'] = np.hstack(parts[:, 7])
 
 
-# def td_surface_grid_main(args):
-#
-#     blatpn, uarea, omega, radius, mass = args
-#
-#     zh = abs(np.sin(blatpn[0]) - np.sin(blatpn[1])) * radius
-#     zarea = 2. * np.pi * radius * zh
-#
-#     nlon = int(round(zarea / uarea))
-#     blong = np.linspace(0.0, 2.0 * np.pi, nlon + 1)
-#
-#     areas = []
-#     uvws = []
-#
-#     inds1 = [(0, 0), (1, 0), (0, 1)]
-#     inds2 = [(1, 0), (1, 1), (0, 1)]
-#     for j in range(nlon):
-#         for inds in [inds1, inds2]:
-#             polygon = []
-#
-#             for ind in inds:
-#                 rlat = calc_r_to_Re_ratio(omega=omega, theta=blatpn[ind[0]] + np.pi / 2.0)
-#                 rlat = rlat * radius
-#
-#                 xp, yp, zp = ast_stc(rlat, blatpn[ind[0]], blong[j + ind[1]])
-#
-#                 polygon.append([xp.value, yp.value, zp.value])
-#             uvws.append(np.array(polygon.copy()))
-#
-#             area = calc_triangle_area(polygon)
-#             areas.append(area)
-#
-#     rzlat = calc_r_to_Re_ratio(omega=omega, theta=(blatpn[0] + blatpn[1] + np.pi) / 2.0)
-#     rzlat = rzlat * radius
-#
-#     xpc, ypc, zpc = ast_stc(rzlat, [(blatpn[0] + blatpn[1]) / 2.0] * nlon,
-#                             (blong[1:] + blong[:-1]) / 2.)
-#
-#     rs, lats, longs = ast_cts(xpc, ypc, zpc)
-#
-#     loggs = calc_logg(mass=mass, re=radius, rs=rs.value, omega=omega, theta=lats.value + np.pi / 2.0)
-#
-#     return nlon, blong, areas, rs.value, lats.value, longs.value, uvws, loggs
-
-
 def calc_triangle_area(polygon):
 
     v1 = np.array(polygon[0])
@@ -314,7 +270,8 @@ def input_data_prep(container, conf):
                 oerrs /= scale_factor
 
                 if container[mode]['vels'] is not None:
-                    ovels, oprf, oerrs = PyD.interp1d_unc(container[mode]['vels'], ovels, oprf, oerrs, kind='linear')
+                    irese = lin_interp_with_unc(ovels, uc_uarray(oprf, oerrs) , container[mode]['vels'])
+                    ovels, oprf, oerrs = container[mode]['vels'], uc_nominal(irese), uc_std(irese)
 
                 data_dict[itime]['vels'] = ovels.copy()
                 data_dict[itime]['prf'] = oprf.copy()
@@ -340,15 +297,17 @@ def input_data_prep(container, conf):
             fluxs = fluxs[srt]
             errs = errs[srt]
 
+            if conf[mode]['scaling']['method'] == 'mean':
+                scale_factor = np.average(fluxs)
+
+            fluxs /= scale_factor
+            errs /= scale_factor
+
             if container[mode]['norsp'] is not None:
                 norsp = container[mode]['norsp']
                 ntimes = np.linspace(min(times), max(times), norsp)
-                times, fluxs, errs = PyD.interp1d_unc(ntimes, times, fluxs, errs, kind='linear')
-
-            if conf[mode]['scaling']['method'] == 'mean':
-                scale_factor = np.average(fluxs)
-            fluxs /= scale_factor
-            errs /= scale_factor
+                irese = lin_interp_with_unc(times, uc_uarray(fluxs, errs), ntimes)
+                times, fluxs, errs = ntimes, uc_nominal(irese), uc_std(irese)
 
             data_dict = {'fluxs': fluxs, 'errs': errs}
 
@@ -373,6 +332,19 @@ def get_total_fs(fssc, fssh, areas, lats, incl):
     return total_fsc, total_fsh, total_fsp, partial_fsc, partial_fsh, partial_fsp
 
 
+def get_hemisphere_fs(fssc, fssh, epoch, areas, lats, longs, incl):
+
+    nlong = longs + 2.0 * np.pi * epoch
+    mu = np.sin(lats) * np.cos(np.deg2rad(incl)) + np.cos(lats) * np.sin(np.deg2rad(incl)) * np.cos(nlong)
+    w = np.argwhere(mu > 0.0).T[0]
+
+    hemi_fsc = np.sum(fssc[w] * areas[w]) / np.sum(areas[w])
+    hemi_fsh = np.sum(fssh[w] * areas[w]) / np.sum(areas[w])
+    hemi_fsp = np.sum((1. - fssc[w] - fssh[w]) * areas[w]) / np.sum(areas[w])
+
+    return hemi_fsc, hemi_fsh, hemi_fsp
+
+
 def calc_logg(mass, re, rs, omega, theta):
 
     mass_kg = mass * au.solMass.to(au.kg)
@@ -392,9 +364,21 @@ def calc_logg(mass, re, rs, omega, theta):
     return np.log10(geff)
 
 
-def calc_gds(omega, thetas):
+def calc_gds_classic(loggs, beta=0.08):
 
-    gds = np.zeros(len(thetas))
+    gs = 10 ** loggs
+    g_ratio = gs / np.max(gs)
+
+    Tratio = g_ratio ** beta
+    Fratio = Tratio ** 4
+
+    return Tratio, Fratio
+
+
+def calc_gds_LR(omega, thetas):
+
+    Tratio = np.zeros(len(thetas))
+    Fratio = np.zeros(len(thetas))
     for i, theta in enumerate(thetas):
 
         theta = np.pi - theta if theta > np.pi / 2. else theta
@@ -411,10 +395,12 @@ def calc_gds(omega, thetas):
             nu = calc_nu(omega=omega, r=r, theta=theta)
             fluxw = np.tan(nu)**2 / np.tan(theta)**2
 
-        gds[i] = ((r**-4 + omega**4 * r**2 * np.sin(theta)**2 - (2.0 * omega**2 * np.sin(theta)**2 / r))**(1.0/8.0)
+        Tratio[i] = ((r**-4 + omega**4 * r**2 * np.sin(theta)**2 - (2.0 * omega**2 * np.sin(theta)**2 / r))**(1.0/8.0)
                   * fluxw**0.25)
 
-    return gds
+        Fratio[i] = Tratio[i]**4
+
+    return Tratio, Fratio
 
 
 def r_func(r, omega, theta):
@@ -592,20 +578,20 @@ def ldcs_rgi_prep(teffps, teffcs, teffhs, loggs, law, mh, model, data_path, mu_m
                   cpu_num=1):
     nop = len(teffps)
     teffs = np.hstack((teffps, teffcs, teffhs))
-    loggs = np.array(list(loggs) * 3)
+    loggs_ = np.array(list(loggs) * 3)
 
     r_M_H = 1.00
     r_Teff = 607.
     r_logg = 1.54
-    par_grid = np.vstack(([mh / r_M_H] * len(teffs), teffs / r_Teff, loggs / r_logg)).T
+    par_grid = np.vstack(([mh / r_M_H] * len(teffs), teffs / r_Teff, loggs_ / r_logg)).T
 
     stellar_kd_tree = _get_stellar_model_kd_tree(ld_model=model)
     distance, nearest_idx = stellar_kd_tree.query(par_grid, k=1)
     matches = stellar_kd_tree.data[nearest_idx] * np.array([r_M_H, r_Teff, r_logg])
     umatches = np.unique(matches, axis=0)
 
-    teffr = (min(umatches[:, 1]), max(umatches[:, 1]))
-    loggr = (min(umatches[:, 2]), max(umatches[:, 2]))
+    teffr = (int(min(umatches[:, 1])), int(max(umatches[:, 1])))
+    loggr = (float(min(umatches[:, 2])), float(max(umatches[:, 2])))
     mhr = np.unique(umatches[:, 0])[0]
 
     input_args = []
@@ -635,14 +621,7 @@ def ldcs_rgi_prep(teffps, teffcs, teffhs, loggs, law, mh, model, data_path, mu_m
                 ldc1[i] = parts[j, 0]
                 ldc2[i] = parts[j, 1]
                 Imu0[i] = parts[j, 2]
-
-    """ buraya dikkat. intensiti değerleri cok yüksek olduğu için phot sıcaklığı ve en küçük logg (ekvatora yakın diye)
-     ye karşılık gelen Imu0 a normalize edildi. böylece ışık eğrisi çok yüksek değerlerde oluşmayacak ve amp free
-      olduğunda uygun değere gidebilecek"""
-    # base_Imu0 = ldcs_rgi_prep_main([teffs[0], np.min(loggs), law, mh, model, data_path, mu_min, wrange, passband, 0])[-2]
-    # Imu0 /= base_Imu0
     Imu0 /= np.mean(Imu0)
-    """"""
 
     rgi = {'phot': [ldc1[:nop], ldc2[:nop], Imu0[:nop]],
            'cool': [ldc1[nop:nop * 2], ldc2[nop:nop * 2], Imu0[nop:nop * 2]],
@@ -773,8 +752,6 @@ def hp_to_rect_map(ints, fssc, fssp, fssh, nside, xsize=180, ysize=90):
 
 
 def p2m_to_rect_map(lats, longs, ints, fssc, fssp, fssh, xsize, ysize):
-
-    # _, rd_ints, _, lats, longs = cutils.subdivision(grid_xyzs, ints, subno=5)
 
     xlats = np.linspace(np.pi / 2., -np.pi / 2., ysize)
     xlongs = np.linspace(0, 2 * np.pi, xsize)
@@ -939,10 +916,6 @@ def test_map_plot(DIP, fake_fssc, fake_fssh, fake_total_fs, recons_total_fs, plo
     recons_fssc = DIP.opt_results['recons_fssc']
     recons_fssh = DIP.opt_results['recons_fssh']
 
-    fig = plt.figure(figsize=figsize)
-    ax1 = plt.subplot2grid((2, 1), (0, 0))
-    ax2 = plt.subplot2grid((2, 1), (1, 0))
-
     fake_ints = (fake_fssc * DIP.params['Tcool'] ** 4 + fake_fssh * DIP.params['Thot'] ** 4 +
                 (1.0 - (fake_fssc + fake_fssh)) * DIP.params['Tphot'] ** 4) / DIP.params['Tphot'] ** 4
 
@@ -962,75 +935,166 @@ def test_map_plot(DIP, fake_fssc, fake_fssh, fake_total_fs, recons_total_fs, plo
     vmin = (Tcool / Tphot) ** 4
     vmax = (Thot / Tphot) ** 4
 
-    img2 = ax1.imshow(frmap, cmap='gray', aspect='auto', extent=fextent, interpolation='bicubic',
-                      vmin=vmin, vmax=vmax)
-    img3 = ax2.imshow(crmap, cmap='gray', aspect='auto', extent=cextent, interpolation='bicubic',
-                      vmin=vmin, vmax=vmax)
+    tsa_title1 = 'Total Spotted Area (%) = ' + str('%0.3f' % round((fake_total_fs[0] + fake_total_fs[1]) * 100, 3))
+    tsa_title2 = 'Total Spotted Area (%) = ' + str('%0.3f' % round((recons_total_fs[0] + recons_total_fs[1]) * 100, 3))
 
-    ax1.text(30, -70, 'Total Spotted Area (%) = ' +
-             str('%0.3f' % round((fake_total_fs[0] + fake_total_fs[1]) * 100, 3)))
-    ax2.text(30, -70, 'Total Spotted Area (%) = ' +
-             str('%0.3f' % round((recons_total_fs[0] + recons_total_fs[1]) * 100, 3)))
+    if plotp['map_projection'] == 'rectangular':
+        fig = plt.figure(figsize=figsize)
+        ax1 = plt.subplot2grid((2, 1), (0, 0))
+        ax2 = plt.subplot2grid((2, 1), (1, 0))
 
-    divider2 = make_axes_locatable(ax1)
-    cax2 = divider2.append_axes('right', size='5%', pad='5%')
-    clb2 = fig.colorbar(img2, cax=cax2)
-    clb2.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'])
+        img2 = ax1.imshow(frmap, cmap=plotp['cmap'], aspect='auto', extent=fextent, interpolation='bicubic',
+                          vmin=vmin, vmax=vmax)
+        img3 = ax2.imshow(crmap, cmap=plotp['cmap'], aspect='auto', extent=cextent, interpolation='bicubic',
+                          vmin=vmin, vmax=vmax)
 
-    divider3 = make_axes_locatable(ax2)
-    cax3 = divider3.append_axes('right', size='5%', pad='5%')
-    clb3 = fig.colorbar(img3, cax=cax3)
-    clb3.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'])
+        ax1.text(0.5, 1.10, "Artificial Map", transform=ax1.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'], fontweight='bold')
+        ax1.text(0.5, 1.00, tsa_title1, transform=ax1.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'] - 5)
 
-    ax1.set_xticks(np.arange(0, 420, 60))
-    ax1.set_yticks(np.arange(-90, 120, 30))
-    ax1.set_title('Artificial Map', fontsize=plotp['fontsize'])
-    ax1.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'])
-    ax1.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        ax2.text(0.5, 1.10, "Reconstructed Map", transform=ax2.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'], fontweight='bold')
+        ax2.text(0.5, 1.00, tsa_title2, transform=ax2.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'] - 5)
 
-    ax2.set_xticks(np.arange(0, 420, 60))
-    ax2.set_yticks(np.arange(-90, 120, 30))
-    ax2.set_title('Reconstructed Map', fontsize=plotp['fontsize'])
-    ax2.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'])
-    ax2.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        divider2 = make_axes_locatable(ax1)
+        cax2 = divider2.append_axes('right', size='5%', pad='5%')
+        clb2 = fig.colorbar(img2, cax=cax2)
+        clb2.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'])
 
-    colors = ['r', 'b', 'g', 'purple']
-    for i, mode in enumerate(reversed(DIP.conf)):
-        epochs = (DIP.idc[mode]['times'] - DIP.params['t0']) / DIP.params['period']
-        phases = epochs - np.floor(epochs)
+        divider3 = make_axes_locatable(ax2)
+        cax3 = divider3.append_axes('right', size='5%', pad='5%')
+        clb3 = fig.colorbar(img3, cax=cax3)
+        clb3.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'])
 
-        ax1.plot([360 * (1.0 - phases), 360 * (1.0 - phases)], [-85, -75], '-', color=colors[i], linewidth=2)
-        ax2.plot([360 * (1.0 - phases), 360 * (1.0 - phases)], [-85, -75], '-', color=colors[i], linewidth=2)
+        ax1.set_xticks(np.arange(0, 420, 60))
+        ax1.set_yticks(np.arange(-90, 120, 30))
+        ax1.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'])
+        ax1.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        ax1.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
 
-        if 0.0 in phases:
-            ax1.plot([0, 0], [-85, -75], '-', color=colors[i], linewidth=2)
-            ax2.plot([0, 0], [-85, -75], '-', color=colors[i], linewidth=2)
+        ax2.set_xticks(np.arange(0, 420, 60))
+        ax2.set_yticks(np.arange(-90, 120, 30))
+        ax2.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'])
+        ax2.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        ax2.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
 
-    ax1.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
-    ax2.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
+        colors = {'line': 'r', 'mol1': 'g', 'mol2': 'purple', 'lc': 'b'}
+        zorders = {'line': 4, 'mol1': 3, 'mol2': 2, 'lc': 1}
+        for i, mode in enumerate(reversed(DIP.conf)):
+            epochs = (DIP.idc[mode]['times'] - DIP.params['t0']) / DIP.params['period']
+            phases = epochs - np.floor(epochs)
 
-    ax1.fill_between(x=[fextent[0], fextent[1]], y1=-DIP.params['incl'], y2=fextent[2], color='yellow', alpha=0.15)
-    ax2.fill_between(x=[cextent[0], cextent[1]], y1=-DIP.params['incl'], y2=cextent[2], color='yellow', alpha=0.15)
+            ax1.plot([360 * (1.0 - phases), 360 * (1.0 - phases)], [-85, -75], '-', color=colors[mode],
+                     linewidth=2, zorder=zorders[mode])
+            ax2.plot([360 * (1.0 - phases), 360 * (1.0 - phases)], [-85, -75], '-', color=colors[mode],
+                     linewidth=2, zorder=zorders[mode])
 
-    ax1.grid()
-    ax2.grid()
+            if 0.0 in phases:
+                ax1.plot([0, 0], [-85, -75], '-', color=colors[mode], linewidth=2, zorder=zorders[mode])
+                ax2.plot([0, 0], [-85, -75], '-', color=colors[mode], linewidth=2, zorder=zorders[mode])
 
-    plt.tight_layout()
+        ax1.fill_between(x=[fextent[0], fextent[1]], y1=-DIP.params['incl'], y2=fextent[2], color=plotp['fill_color'],
+                         alpha=0.15)
+        ax2.fill_between(x=[cextent[0], cextent[1]], y1=-DIP.params['incl'], y2=cextent[2], color=plotp['fill_color'],
+                         alpha=0.15)
+
+        ax1.grid()
+        ax2.grid()
+
+        plt.tight_layout()
+
+    elif plotp['map_projection'] == 'mollweide':
+
+        xlats = DIP.mapprojs['xlats']
+        xlongs = DIP.mapprojs['xlongs']
+
+        fig = plt.figure(figsize=figsize)
+        ax1 = plt.subplot2grid((2, 1), (0, 0), projection="mollweide")
+        ax2 = plt.subplot2grid((2, 1), (1, 0), projection="mollweide")
+
+        img1 = ax1.pcolormesh(xlongs - np.pi, xlats, frmap, cmap=plotp['cmap'], shading='gouraud', vmin=vmin,
+                              vmax=vmax)
+        img2 = ax2.pcolormesh(xlongs - np.pi, xlats, crmap, cmap=plotp['cmap'], shading='gouraud', vmin=vmin,
+                              vmax=vmax)
+
+        ax1.text(0.5, 1.20, "Artificial Map", transform=ax1.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'], fontweight='bold')
+        ax1.text(0.5, 1.10, tsa_title1, transform=ax1.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'] - 5)
+
+        ax2.text(0.5, 1.20, "Reconstructed Map", transform=ax2.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'], fontweight='bold')
+        ax2.text(0.5, 1.10, tsa_title2, transform=ax2.transAxes, ha='center', va='bottom',
+                 fontsize=plotp['fontsize'] - 5)
+
+        cb1 = fig.colorbar(img1, ax=ax1, location='right')
+        cb1.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'] + 5)
+        cb1.ax.tick_params(labelsize=plotp['ticklabelsize'])
+        cb1.set_ticks((0.4, 0.6, 0.8, 1.))
+
+        cb2 = fig.colorbar(img2, ax=ax2, location='right')
+        cb2.set_label(r'$\frac{I}{I_{phot}}$', fontsize=plotp['fontsize'] + 5)
+        cb2.ax.tick_params(labelsize=plotp['ticklabelsize'])
+        cb2.set_ticks((0.4, 0.6, 0.8, 1.))
+
+        ax1.set_xticks(np.deg2rad(np.arange(-120, 180, 60)))
+        ax1.set_yticks(np.deg2rad(np.arange(-90, 120, 30)))
+        ax1.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'], labelpad=15)
+        ax1.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        xtick_labels = np.arange(60, 360, 60)
+        ax1.set_xticklabels(xtick_labels, zorder=15)
+        ax1.xaxis.set_label_coords(0.5, -0.100)
+        ax1.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
+
+        ax2.set_xticks(np.deg2rad(np.arange(-120, 180, 60)))
+        ax2.set_yticks(np.deg2rad(np.arange(-90, 120, 30)))
+        ax2.set_xlabel(r'Longitude ($^\circ$)', fontsize=plotp['fontsize'], labelpad=15)
+        ax2.set_ylabel(r'Latitude ($^\circ$)', fontsize=plotp['fontsize'])
+        xtick_labels = np.arange(60, 360, 60)
+        ax2.set_xticklabels(xtick_labels, zorder=15)
+        ax2.xaxis.set_label_coords(0.5, -0.100)
+        ax2.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
+
+        colors = ['b', 'g']
+        ranges = [[-35, -30], [-40, -35]]
+        for i, mode in enumerate(DIP.conf):
+            if mode in ['line', 'lc']:
+                epochs = (DIP.idc[mode]['times'] - DIP.params['t0']) / DIP.params['period']
+                phases = epochs - np.floor(epochs)
+                obslong = 360 * (1.0 - phases) - 180
+
+                ax1.plot(np.deg2rad([obslong, obslong]), np.deg2rad(ranges[i]), '-', color=colors[i], linewidth=1)
+                ax2.plot(np.deg2rad([obslong, obslong]), np.deg2rad(ranges[i]), '-', color=colors[i], linewidth=1)
+                if 0.0 in phases:
+                    ax1.plot(np.deg2rad([0.0, 0.0]), np.deg2rad(ranges[i]), '-', color=colors[i], linewidth=1)
+                    ax2.plot(np.deg2rad([0.0, 0.0]), np.deg2rad(ranges[i]), '-', color=colors[i], linewidth=1)
+
+        ax1.fill_between(x=[-np.pi, np.pi], y1=np.deg2rad(-DIP.params['incl']), y2=-np.pi / 2., color=plotp['fill_color'],
+                         alpha=0.3)
+        ax2.fill_between(x=[-np.pi, np.pi], y1=np.deg2rad(-DIP.params['incl']), y2=-np.pi / 2., color=plotp['fill_color'],
+                         alpha=0.3)
+
+        ax1.grid(True)
+        ax2.grid(True)
+
+        plt.subplots_adjust(hspace=0.2, top=0.95, bottom=0.05)
 
 
 def lmbds_plot(DIP, plotp):
 
     lmbds = DIP.opt_results['lmbds']
-    chisqs = DIP.opt_results['total_chisqs']
-    mems = DIP.opt_results['mems']
+    twchisqs = DIP.opt_results['twchisqs']
+    entropies = DIP.opt_results['entropies']
     maxcurve = DIP.opt_results['maxcurve']
 
     fig, ax1 = plt.subplots()
 
     lmbd = lmbds[maxcurve]
 
-    ax1.plot(chisqs, mems, 'ko', ms=2)
-    ax1.plot(chisqs[maxcurve], mems[maxcurve], 'ro', ms=3, label='Best lmbd = ' + str(lmbd))
+    ax1.plot(twchisqs, entropies, 'ko', ms=2)
+    ax1.plot(twchisqs[maxcurve], entropies[maxcurve], 'ro', ms=3, label='Best lmbd = ' + str(lmbd))
     ax1.set_xlabel(r'$\chi^2$', fontsize=plotp['fontsize'])
     ax1.set_ylabel('Entropy', fontsize=plotp['fontsize'])
     ax1.tick_params(axis='both', labelsize=plotp['ticklabelsize'])
@@ -1039,23 +1103,49 @@ def lmbds_plot(DIP, plotp):
     plt.tight_layout()
 
 
-def make_grid_contours(chisq_grid, minv):
+def make_grid_contours(stats_grid, minv):
 
-    names = list(chisq_grid.keys())
-    names.remove('chisqs')
+    keys = list(stats_grid.keys())
+    for key in keys:
+        if key not in ['stats', 'fit_params']:
+            if len(np.unique(stats_grid[key])) == 1:
+                del stats_grid[key]
+                del stats_grid['fit_params'][key]
 
-    mn = np.argmin(chisq_grid['chisqs'])
+    # Deduplicate after removing constant parameters
+    remaining_keys = [k for k in stats_grid if k not in ['stats', 'fit_params']]
+    if remaining_keys:
+        stacked = np.column_stack([stats_grid[k] for k in remaining_keys])
+        _, unique_idx = np.unique(stacked, axis=0, return_index=True)
+        unique_idx = np.sort(unique_idx)
+        for key in remaining_keys:
+            stats_grid[key] = stats_grid[key][unique_idx]
+        stats_grid['stats'] = stats_grid['stats'][unique_idx]
 
+    names = list(stats_grid.keys())
+    names.remove('stats')
+    names.remove('fit_params')
+
+    if minv == "chi":
+        indicator = stats_grid['stats'][:, 0]
+        label = r'$\chi^2$'
+    elif minv == "loss":
+        indicator = stats_grid['stats'][:, 1]
+        label = r'$\chi^2$ + $\lambda$ * $MEM$'
+
+    mn = np.argmin(indicator)
+
+    print('\n' + '\033[96m' + '*** Grid Search Results ***' + '\033[0m')
     if len(names) == 1:
 
-        mpar = chisq_grid[names[0]][mn]
+        mpar = stats_grid[names[0]][mn]
 
         print(names[0], ':', mpar)
 
-        plt.plot(chisq_grid[names[0]], chisq_grid['chisqs'], 'ko')
+        plt.plot(stats_grid[names[0]], indicator, 'ko')
         plt.xlabel(r"$\nu sini$ (km/s)" if names[0] == 'vsini' else ('EW' if names[0] == 'eqw' else names[0]),
                    fontsize=15)
-        plt.ylabel(r'$\chi^2$', fontsize=15)
+        plt.ylabel(label, fontsize=15)
         plt.show()
 
         return
@@ -1063,39 +1153,39 @@ def make_grid_contours(chisq_grid, minv):
     combin = np.array(list(combinations(names, 2)))
     combin[len(names) - 2] = combin[len(names) - 2][::-1]
 
-    print('\n' + '\033[96m' + '*** Grid Search Results ***' + '\033[0m')
+    fit_params = stats_grid['fit_params']
     for pair in combin:
 
         par1_name = pair[0]
         par2_name = pair[1]
 
         index = []
-        for rpar in chisq_grid:
-            if rpar not in [par1_name, par2_name, 'chisqs']:
-                index.append(np.argwhere(chisq_grid[rpar] == chisq_grid[rpar][mn]).flatten())
+        for rpar in stats_grid:
+            if rpar not in [par1_name, par2_name, 'stats', 'fit_params']:
+                index.append(np.argwhere(stats_grid[rpar] == stats_grid[rpar][mn]).flatten())
 
         if len(index) > 0:
             inters = reduce(np.intersect1d, index)
-            chi = np.array(chisq_grid['chisqs'])[inters]
-            par1 = chisq_grid[par1_name][inters]
-            par2 = chisq_grid[par2_name][inters]
+            chi = np.array(indicator)[inters]
+            par1 = stats_grid[par1_name][inters]
+            par2 = stats_grid[par2_name][inters]
         else:
-            chi = np.array(chisq_grid['chisqs'])
-            par1 = chisq_grid[par1_name]
-            par2 = chisq_grid[par2_name]
+            chi = np.array(indicator)
+            par1 = stats_grid[par1_name]
+            par2 = stats_grid[par2_name]
 
-        contour = np.zeros((len(np.unique(par2)), len(np.unique(par1))))
-        for i, ei in enumerate(sorted(np.unique(par2))):
+        contour = np.zeros((len(fit_params[par2_name]), len(fit_params[par1_name])))
+        for i, ei in enumerate(fit_params[par2_name]):
             vss = np.argsort(par1[par2 == ei])
             contour[i] = chi[par2 == ei][vss]
 
-        mn = np.argmin(chisq_grid['chisqs'])
-        mpar1 = chisq_grid[par1_name][mn]
-        mpar2 = chisq_grid[par2_name][mn]
+        mn = np.argmin(indicator)
+        mpar1 = stats_grid[par1_name][mn]
+        mpar2 = stats_grid[par2_name][mn]
 
         fig, ax = plt.subplots()
-        cont = ax.contourf(sorted(np.unique(par1)), sorted(np.unique(par2)), contour, 50, cmap='RdYlBu')
-        levels = [1 + chisq_grid['chisqs'][mn]]
+        cont = ax.contourf(fit_params[par1_name], fit_params[par2_name], contour, 50, cmap='RdYlBu')
+        levels = [1 + indicator[mn]]
         uc = plt.contour(cont, levels=levels)
         ax.clabel(uc, inline=False, use_clabeltext=True, fmt=lambda x: "min + 1 = " + str('%0.3f' % x), colors='k',
                   fontsize=10)
@@ -1105,10 +1195,10 @@ def make_grid_contours(chisq_grid, minv):
         if len(chipone) != 0:
 
             if (
-                    max(chipone[:, 0]) == max(chisq_grid[par1_name]) or
-                    min(chipone[:, 0]) == min(chisq_grid[par1_name]) or
-                    max(chipone[:, 1]) == max(chisq_grid[par2_name]) or
-                    min(chipone[:, 1]) == min(chisq_grid[par2_name])
+                    max(chipone[:, 0]) == max(stats_grid[par1_name]) or
+                    min(chipone[:, 0]) == min(stats_grid[par1_name]) or
+                    max(chipone[:, 1]) == max(stats_grid[par2_name]) or
+                    min(chipone[:, 1]) == min(stats_grid[par2_name])
             ):
                 print(
                     '\033[91m' + "Warning: Unable to fully estimate parameter uncertainties because the region defined "
@@ -1144,36 +1234,44 @@ def make_grid_contours(chisq_grid, minv):
                             ticks=np.linspace(np.min(contour), np.max(contour), 5))
         cbar.ax.set_xlim((np.min(contour), np.max(contour)))
         cbar.ax.tick_params(labelsize=15)
-        if minv == "chi":
-            cbar.set_label('$\chi^2$', fontsize=15)
-        elif minv == "loss":
-            cbar.set_label('$\chi^2$ + $\lambda$ * $MEM$', fontsize=15)
+        cbar.set_label(label, fontsize=15)
         cbar.ax.xaxis.set_ticks_position("top")
         cbar.ax.xaxis.set_label_position("top")
-
-        # plt.subplots_adjust(left=0.15, bottom=0.14, right=0.97, top=0.84)
 
     plt.tight_layout()
     plt.show()
 
 
-def grid_test(xyzs, scalars, title, show=True):
+def grid_test(xyzs, scalars, win_title, bar_title, show=True):
 
-    from mayavi import mlab
+    def plot(dx, dy, dz, dtriangles, dtdmap, plotter):
 
-    def plot(dx, dy, dz, dtriangles, dnscalars1):
-        mlab.figure(title)
-        smesh = mlab.triangular_mesh(dx, dy, dz, dtriangles, scalars=dnscalars1,
-                                     colormap='YlOrBr', line_width=3.0)
+        faces = np.hstack(
+            [np.column_stack((np.full((len(dtriangles), 1), 3, dtype=np.int64), dtriangles)).ravel()]
+        )
+        points = np.column_stack((dx, dy, dz))
+        mesh = pv.PolyData(points, faces)
+        mesh["scalars"] = dtdmap  # vertex scalars
 
-        carr = smesh.module_manager.scalar_lut_manager.lut.table.to_array()
-        ncarr = carr[::-1]
-        smesh.module_manager.scalar_lut_manager.lut.table = ncarr
-
-        cb = mlab.colorbar(smesh, title=title, nb_labels=5, label_fmt='%0.4f', orientation='horizontal')
-        cb.label_text_property.font_family = 'times'
-        cb.label_text_property.bold = 0
-        # cb.label_text_property.font_size = 50
+        plotter.add_mesh(
+            mesh,
+            scalars="scalars",
+            cmap="gist_heat",
+            # clim=[self.vmin, self.vmax],
+            show_edges=False,  # kenar görmek istersen True + edge_color="black"
+            scalar_bar_args=dict(
+                title=bar_title,
+                n_labels=6,
+                fmt="%.4f",
+                vertical=False,
+                title_font_size=15,
+                label_font_size=15,
+                width=0.60,  # bar genişliği (ekranın %60’ı)
+                height=0.08,  # bar yüksekliği
+                position_x=0.20,  # (1 - width)/2 = (1 - 0.60)/2 = 0.20
+                position_y=0.02,  # alta yakın
+            )
+        )
 
     x = []
     y = []
@@ -1189,10 +1287,18 @@ def grid_test(xyzs, scalars, title, show=True):
         triangles.append((0 + i * 3, 1 + i * 3, 2 + i * 3))
     nscalars = np.hstack(nscalars)
 
-    plot(x, y, z, triangles, nscalars)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+    tdmap = np.hstack(nscalars).astype(float)
+    triangles = np.asarray(triangles, dtype=np.int64)  # 0-based
+
+    plotter = pv.Plotter()
+    plot(x, y, z, triangles, tdmap, plotter)
 
     if show:
-        mlab.show()
+        plotter.add_title(win_title, font_size=20)
+        plotter.show()
 
 
 def draw_3D_surf(params, surface_grid, spots_params):
@@ -1214,35 +1320,124 @@ def draw_3D_surf(params, surface_grid, spots_params):
     grid_test(xyzs=xyzs, scalars=scalars, title='Spotted Star')
 
 
-def mp_calc_pixel_coeffs(cpu_num, input_args, mode):
+_shared = {}
 
-    if mode != 'lc':
-        func = cutils.calc_pixel_coeffs_spec
-    else:
-        func = cutils.calc_pixel_coeffs_lc
+def _init_worker(shared_arrays, mode):
+    _shared['arrays'] = shared_arrays
+    _shared['mode'] = mode
+
+def _worker_spec(per_timestep_args):
+    s = _shared['arrays']
+    itime, icount, info = per_timestep_args
+    return cutils.calc_pixel_coeffs_spec((
+        itime, s['plats'], s['vlats'],
+        s['ldcs_phot'], s['ldcs_cool'], s['ldcs_hot'],
+        s['lis_phot'], s['lis_cool'], s['lis_hot'],
+        s['areas'], s['lats'], s['longs'],
+        s['nop'], s['t0'], s['incl'], s['ld_law'], s['noes'],
+        s['lp_vels'], s['phot_lp'], s['cool_lp'], s['hot_lp'],
+        s['vrt'], s['vels'], s['period'], icount, info
+    ))
+
+def _worker_lc(per_timestep_args):
+    s = _shared['arrays']
+    itime, icount, info = per_timestep_args
+    return cutils.calc_pixel_coeffs_lc((
+        itime, s['plats'], s['ldcs_phot'], s['ldcs_cool'], s['ldcs_hot'],
+        s['lis_phot'], s['lis_cool'], s['lis_hot'],
+        s['areas'], s['lats'], s['longs'],
+        s['t0'], s['incl'], s['ld_law'], s['noes'],
+        s['period'], icount, info
+    ))
+
+def mp_calc_pixel_coeffs(cpu_num, shared_arrays, per_timestep_args, mode):
+    func = _worker_spec if mode != 'lc' else _worker_lc
 
     if cpu_num > 1:
-        pool = multiprocessing.Pool(processes=cpu_num)
-        results = pool.map(func, input_args)
-        pool.close()
-        pool.join()
-
+        with multiprocessing.Pool(
+            processes=cpu_num,
+            initializer=_init_worker,
+            initargs=(shared_arrays, mode),
+        ) as pool:
+            return pool.map(func, per_timestep_args)
     else:
-        results = []
-        for item in input_args:
-            results.append(func(item))
-
-    return results
+        _init_worker(shared_arrays, mode)
+        return [func(item) for item in per_timestep_args]
 
 
-def mp_search(cpu_num, func, input_args):
+def mp_search(cpu_num, func, input_args, backend):
 
-    pool = multiprocessing.Pool(processes=cpu_num)
     results = []
-    for result in tqdm.tqdm(pool.imap(func=func, iterable=input_args), total=len(input_args)):
-        results.append(result)
+    if backend == "cpu":
+        pool = multiprocessing.Pool(processes=cpu_num)
+        for result in tqdm.tqdm(pool.imap(func=func, iterable=input_args), total=len(input_args)):
+            results.append(result)
+
+    elif backend == "cuda":
+        for fpmg in tqdm.tqdm(input_args, total=len(input_args)):
+            results.append(func(fpmg))
+            jax.clear_caches()
 
     return results
+
+def generate_noisy_normalized_profile(model, snr=100, read_noise=5.0):
+    """
+    model: normalize tayf (continuum ~ 1)
+    snr: continuum'daki hedef SNR
+    read_noise: elektron cinsinden readout noise
+    """
+
+    continuum_level = snr**2
+
+    counts_model = model * continuum_level
+
+    noisy_counts = np.random.poisson(counts_model).astype(np.float64)
+
+    noisy_counts += np.random.normal(0, read_noise, size=len(model))
+    noisy_flux = noisy_counts / continuum_level
+
+    noisy_counts_clipped = np.clip(noisy_counts, 0, None)
+    sigma_counts = np.sqrt(noisy_counts_clipped + read_noise ** 2)
+    flux_error = sigma_counts / continuum_level
+
+    return noisy_flux, flux_error
+
+
+def lin_interp_with_unc(x_data, y_data, xq):
+    """
+    Parça-parça doğrusal interpolasyon.
+    # - Eğer xq == x_data: doğrudan aynı y_data (ve hatası).
+    - Eğer xq < min(x_data) veya xq > max(x_data): en yakın uçtaki y_data.
+    - Aksi halde doğrusal interpolasyon (belirsizlikle).
+    """
+    x_data = np.asarray(x_data)
+    xq = np.atleast_1d(xq)  # vektörel çalışsın
+
+    results = []
+    for x in xq:
+        # # Eğer tam çakışma varsa
+        # if np.any(np.isclose(x, x_data)):
+        #     i = np.where(np.isclose(x, x_data))[0][0]
+        #     results.append(y_data[i])
+        #     continue
+
+        # Eğer dışa taştıysa
+        if x <= x_data[0]:
+            results.append(y_data[0])
+            continue
+        if x >= x_data[-1]:
+            results.append(y_data[-1])
+            continue
+
+        # Normal interpolasyon
+        idx = np.searchsorted(x_data, x, side="right") - 1
+        x0, x1 = x_data[idx], x_data[idx+1]
+        y0, y1 = y_data[idx], y_data[idx+1]
+
+        t = (x - x0) / (x1 - x0)
+        results.append(y0 + t * (y1 - y0))
+
+    return np.array(results, dtype=object)
 
 
 def isfloatable(x):
