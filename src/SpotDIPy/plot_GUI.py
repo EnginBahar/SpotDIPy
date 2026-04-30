@@ -1,19 +1,18 @@
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from PyQt5.uic.Compiler.qtproxies import QtGui
 from matplotlib.figure import Figure
 from matplotlib.cm import ScalarMappable
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.backends.backend_qt import SubplotToolQt
 from mpl_toolkits.basemap import Basemap
-from mayavi.core.ui.api import MayaviScene, MlabSceneModel, SceneEditor
-from traits.api import HasTraits, Instance
-from traitsui.api import View, Item
 from astropy import units as au, constants as ac
 from PyQt5 import QtCore, QtWidgets
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.gridspec as gridspec
+import pyvista as pv
+from pyvistaqt import QtInteractor
+import math
 
 
 groupBoxStyle = '''
@@ -89,11 +88,20 @@ class BaseCanvas(FigureCanvasQTAgg):
         super(BaseCanvas, self).__init__(self.fig)
 
 
-class Visualization(HasTraits):
-    scene = Instance(MlabSceneModel, ())
-
-    view = View(Item('scene', editor=SceneEditor(scene_class=MayaviScene),
-                     show_label=False), resizable=True)
+class VisualizationQt(QtWidgets.QWidget):
+    """
+    PyVista-QtInteractor kullanan widget.
+    .plotter özniteliği üzerinden add_mesh / add_scalar_bar vb. erişilir.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.plotter = QtInteractor(self)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.plotter.interactor)
+        self.plotter.set_background("white")
+        # İstersen paralel projeksiyon:
+        # self.plotter.enable_parallel_projection(True)
 
 
 class PlotGUI(QtWidgets.QMainWindow):
@@ -111,22 +119,16 @@ class PlotGUI(QtWidgets.QMainWindow):
         self.vmax = (DIP.params['Thot'] / DIP.params['Tphot']) ** 4
 
         line_chisq = DIP.opt_stats['Chi-square for Line Profile(s)']
-        mol1_chisq = DIP.opt_stats['Chi-square for Molecular(1) Profile(s)']
-        mol2_chisq = DIP.opt_stats['Chi-square for Molecular(2) Profile(s)']
         lc_chisq = DIP.opt_stats['Chi-square for Light Curve Profile']
         alpha_line_chisq = DIP.opt_stats['Alpha * Line Profile(s) Chi-square']
-        beta_mol1_chisq = DIP.opt_stats['Beta * Molecular(1) Profile(s) Chi-square']
-        gamma_mol2_chisq = DIP.opt_stats['Gamma * Molecular(2) Profile(s) Chi-square']
         delta_lc_chisq = DIP.opt_stats['Delta * Light Curve Profile Chi-square']
         total_chisq = DIP.opt_stats['Total Weighted Chi-square']
-        mem = DIP.opt_stats['Total Entropy']
-        lmbd_mem = DIP.opt_stats['Lambda * Total Entropy']
+        mem = DIP.opt_stats['Entropy']
+        lmbd_mem = DIP.opt_stats['Lambda * Entropy']
         ftot = DIP.opt_stats['Loss Function Value']
 
         lmbd = DIP.opt_results['lmbd']
         alpha = DIP.opt_results['alpha']
-        beta = DIP.opt_results['beta']
-        gamma = DIP.opt_results['gamma']
         delta = DIP.opt_results['delta']
         nit = int(DIP.opt_results['nit'])
         nfev = int(DIP.opt_results['nfev'])
@@ -404,8 +406,7 @@ class PlotGUI(QtWidgets.QMainWindow):
         trid_plot_gbox_glayout.setSpacing(4)
         self.trid_plot_gbox.setStyleSheet(groupBoxStyle)
 
-        self.trid_plot_vis = Visualization()
-        self.trid_plot = self.trid_plot_vis.edit_traits(parent=self, kind='subpanel').control
+        self.trid_plot_vis = VisualizationQt(self)
 
         trid_dis_label = QtWidgets.QLabel('Cam. Distance :')
         trid_incl_label = QtWidgets.QLabel('Inclination :')
@@ -425,7 +426,8 @@ class PlotGUI(QtWidgets.QMainWindow):
         self.trid_dis_dsbox.setMinimum(0)
         self.trid_dis_dsbox.setSingleStep(1.0)
 
-        trid_plot_gbox_glayout.addWidget(self.trid_plot, 0, 0, 1, 6)
+        # trid_plot_gbox_glayout.addWidget(self.trid_plot, 0, 0, 1, 6)
+        trid_plot_gbox_glayout.addWidget(self.trid_plot_vis, 0, 0, 1, 6)
         trid_plot_gbox_glayout.addWidget(trid_dis_label, 1, 0, 1, 1)
         trid_plot_gbox_glayout.addWidget(self.trid_dis_dsbox, 1, 1, 1, 1)
         trid_plot_gbox_glayout.addWidget(trid_incl_label, 1, 2, 1, 1)
@@ -449,23 +451,20 @@ class PlotGUI(QtWidgets.QMainWindow):
         opt_result_gbox.setStyleSheet(groupBoxStyle)
         opt_result_gbox_glayout = QtWidgets.QGridLayout(opt_result_gbox)
 
-        opt_results_row_names = ['Chi-square for Line Profile(s)', 'Chi-square for Molecular(1) Profile(s)',
-                                 'Chi-square for Molecular(2) Profile(s)', 'Chi-square for Light Curve Profile',
-                                 'alpha * Line Profile(s) Chi-square', 'beta * Molecular(1) Profile(s) Chi-square',
-                                 'gamma * Molecular(2) Profile(s) Chi-square', 'delta * Light Curve Profile Chi-square',
-                                 'Total Chi-square', 'Total Entropy', 'lmbd * Total Entropy',
+        opt_results_row_names = ['Chi-square for Line Profile(s)', 'Chi-square for Light Curve Profile',
+                                 'alpha * Line Profile(s) Chi-square', 'delta * Light Curve Profile Chi-square',
+                                 'Total Chi-square', 'Entropy', 'lmbd * Entropy',
                                  'Loss Function Value', 'Number of iteration(s)', 'Number of function evaluation(s)',
-                                 'alpha', 'beta', 'gamma', 'delta', 'lmbd']
-        opt_results_row_vals = [line_chisq, mol1_chisq, mol2_chisq, lc_chisq, alpha_line_chisq, beta_mol1_chisq,
-                                gamma_mol2_chisq, delta_lc_chisq, total_chisq, mem, lmbd_mem, ftot, nit, nfev, alpha,
-                                beta, gamma, delta, lmbd]
+                                 'alpha', 'delta', 'lmbd']
+        opt_results_row_vals = [line_chisq, lc_chisq, alpha_line_chisq, delta_lc_chisq, total_chisq, mem, lmbd_mem,
+                                ftot, nit, nfev, alpha, delta, lmbd]
 
         opt_result_table = QtWidgets.QTableWidget(len(opt_results_row_names), 1)
         opt_result_table.setEditTriggers(QtWidgets.QTableWidget.NoEditTriggers)
         opt_result_table.horizontalHeader().setVisible(False)
         for rni, (row_name, row_val) in enumerate(zip(opt_results_row_names, opt_results_row_vals)):
             opt_result_table.setVerticalHeaderItem(rni, QtWidgets.QTableWidgetItem(row_name))
-            row_val = row_val if type(row_val) is int else round(row_val, 6)
+            row_val = row_val if isinstance(row_val, int) else f"{row_val:0.6e}"
             opt_result_table.setItem(rni, 0, QtWidgets.QTableWidgetItem(str(row_val)))
         opt_result_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         opt_result_table.resizeColumnsToContents()
@@ -476,9 +475,9 @@ class PlotGUI(QtWidgets.QMainWindow):
                                      'Total Spotted Area (%)', 'Total Cool Spotted Area (%)',
                                      'Total Hot Spotted Area (%)', 'Total Unspotted Area (%)',
                                      'Minimum Reduced Intensity (I/Iphot)', 'Maximum Reduced Intensity (I/Iphot)']
-        map_information_row_vals = [DIP.surface_grid['noes'], DIP.surface_grid['method'], round((csa + hsa) * 100, 6),
-                                    round(csa * 100, 6), round(hsa * 100, 6), round(psa * 100, 6), round(self.vmin, 6),
-                                    round(self.vmax, 6)]
+        map_information_row_vals = [DIP.surface_grid['noes'], DIP.surface_grid['method'], f"{(csa + hsa) * 100:0.2f}",
+                                    f"{csa * 100:0.2f}", f"{hsa * 100:0.2f}", f"{psa * 100:0.2f}",
+                                    f"{self.vmin:0.6e}", f"{self.vmax:0.6e}"]
         map_information_gbox = QtWidgets.QGroupBox('Stellar Surface Information')
         map_information_gbox.setStyleSheet(groupBoxStyle)
         map_information_gbox_glayout = QtWidgets.QGridLayout(map_information_gbox)
@@ -528,6 +527,8 @@ class PlotGUI(QtWidgets.QMainWindow):
         self.mol1_error_bar_cbox.stateChanged.connect(self.plot_mol1_profiles)
         self.mol2_error_bar_cbox.stateChanged.connect(self.plot_mol2_profiles)
 
+        self._mesh_actor = None
+
         saveOMDataButton.clicked.connect(self.save_obs_model_data)
         saveMaPDataButton.clicked.connect(self.save_map_data)
         saveGUIButton.clicked.connect(self.saveGUI)
@@ -567,10 +568,10 @@ class PlotGUI(QtWidgets.QMainWindow):
             results_tab.setTabVisible(1, True)
 
             lmbds = DIP.opt_results['lmbds']
-            chisqs = DIP.opt_results['total_wchisqs']
-            mems = DIP.opt_results['mems']
+            twchisqs = DIP.opt_results['twchisqs']
+            entropies = DIP.opt_results['entropies']
             maxcurve = DIP.opt_results['maxcurve']
-            self.plot_lambda_search(lmbds=lmbds, chisqs=chisqs, mems=mems, maxcurve=maxcurve)
+            self.plot_lambda_search(lmbds=lmbds, tchisqs=twchisqs, entropies=entropies, maxcurve=maxcurve)
 
     def save_obs_model_data(self):
 
@@ -668,7 +669,7 @@ class PlotGUI(QtWidgets.QMainWindow):
         ax3.legend(loc='upper center', ncol=3, bbox_to_anchor=(0.5, 1.02), frameon=False)
 
         ax1.set_xlabel('Velocity (km/s)', fontsize=self.fs)
-        ax1.set_ylabel('$\mathregular{I/I_c}$', fontsize=self.fs)
+        ax1.set_ylabel(r'$\mathregular{I/I_c}$', fontsize=self.fs)
 
         ax2.set_xlabel('Velocity (km/s)', fontsize=self.fs)
         ax2.set_ylabel('Residuals', fontsize=self.fs)
@@ -699,17 +700,6 @@ class PlotGUI(QtWidgets.QMainWindow):
             errs = self.DIP.idc['lc']['data']['errs']
 
             epochs = (times - self.DIP.params['t0']) / self.DIP.params['period']
-
-            # if 'line' in self.DIP.conf:
-            #     ltimes = self.DIP.idc['line']['times']
-            #     lepochs = (ltimes - self.DIP.params['t0']) / self.DIP.params['period']
-            #     for lepoch in lepochs:
-            #         ax1.axvline(lepoch - np.floor(lepoch), color='gray', linestyle='--')
-            # phases = epochs - np.floor(epochs)
-            # srt = np.argsort(phases)
-            # phases = phases[srt]
-            # fluxs = fluxs[srt]
-            # recons_slc = recons_slc[srt]
 
             if seb:
                 ax1.errorbar(epochs, fluxs, yerr=errs, fmt='o', color='k', label='Observed Light Curve', ms=self.ms,
@@ -818,11 +808,11 @@ class PlotGUI(QtWidgets.QMainWindow):
         ax3.plot([], [], 'r', label='Spotted Model', linewidth=self.lw)
         ax3.legend(loc='upper center', ncol=3, bbox_to_anchor=(0.5, 1.02), frameon=False)
 
-        ax1.set_xlabel('Wavelength ($\AA$)', fontsize=self.fs)
+        ax1.set_xlabel(r'Wavelength ($\AA$)', fontsize=self.fs)
         ax1.set_ylabel('Normalized Flux', fontsize=self.fs)
         # ax1.legend(loc='upper center', bbox_to_anchor=(0.5, 1.10), ncol=3, frameon=False)
 
-        ax2.set_xlabel('Wavelength ($\AA$)', fontsize=self.fs)
+        ax2.set_xlabel(r'Wavelength ($\AA$)', fontsize=self.fs)
         ax2.set_ylabel('Residuals', fontsize=self.fs)
 
         ax1.tick_params(axis='both', labelsize=self.tls)
@@ -842,8 +832,8 @@ class PlotGUI(QtWidgets.QMainWindow):
 
         ax.set_xticks(np.arange(0, 420, 60))
         ax.set_yticks(np.arange(-90, 120, 30))
-        ax.set_xlabel('Longitude ($^\circ$)', fontsize=self.fs)
-        ax.set_ylabel('Latitude ($^\circ$)', fontsize=self.fs)
+        ax.set_xlabel(r'Longitude ($^\circ$)', fontsize=self.fs)
+        ax.set_ylabel(r'Latitude ($^\circ$)', fontsize=self.fs)
 
         ax.grid(True)
 
@@ -902,8 +892,8 @@ class PlotGUI(QtWidgets.QMainWindow):
                 if 0.0 in phases:
                     ax.plot(np.deg2rad([0.0, 0.0]), np.deg2rad(ranges[i]), '-', color=colors[i], linewidth=1)
 
-        ax.set_xlabel('Longitude ($^\circ$)', fontsize=self.fs)
-        ax.set_ylabel('Latitude ($^\circ$)', fontsize=self.fs)
+        ax.set_xlabel(r'Longitude ($^\circ$)', fontsize=self.fs)
+        ax.set_ylabel(r'Latitude ($^\circ$)', fontsize=self.fs)
 
         cb = self.mollweide_plot.fig.colorbar(img, ax=ax, location='bottom', shrink=0.5)
         cb.set_label(r'$\frac{I}{I_{phot}}$', fontsize=self.fs + 5)
@@ -1006,15 +996,12 @@ class PlotGUI(QtWidgets.QMainWindow):
             self.spherical_dplot.draw()
 
     def plot_3d_surface(self):
-
         fss = self.ints.copy()
         grid_xyzs = self.surface_grid['grid_xyzs'].copy()
         if self.DIP.surface_grid['method'] != 'phoebe2_marching':
             fss = np.repeat(self.ints, 2)
 
-        tdx = []
-        tdy = []
-        tdz = []
+        tdx, tdy, tdz = [], [], []
         triangles = []
         scalars = []
         for i, xyz in enumerate(grid_xyzs):
@@ -1024,40 +1011,122 @@ class PlotGUI(QtWidgets.QMainWindow):
                 tdy.append(row[1])
                 tdz.append(row[2])
             triangles.append((0 + i * 3, 1 + i * 3, 2 + i * 3))
-        tdmap = np.hstack(scalars)
 
-        tmesh = self.trid_plot_vis.scene.mlab.triangular_mesh(tdx, tdy, tdz, triangles,  scalars=tdmap,
-                                                              colormap='gist_heat', line_width=3.0, vmin=self.vmin,
-                                                              vmax=self.vmax)
+        tdx = np.asarray(tdx, dtype=float)
+        tdy = np.asarray(tdy, dtype=float)
+        tdz = np.asarray(tdz, dtype=float)
+        tdmap = np.hstack(scalars).astype(float)
+        triangles = np.asarray(triangles, dtype=np.int64)  # 0-based
 
-        tmesh.scene.y_plus_view()
+        # PyVista faces formatı: [3, i, j, k, 3, i, j, k, ...]
+        faces = np.hstack(
+            [np.column_stack((np.full((len(triangles), 1), 3, dtype=np.int64), triangles)).ravel()]
+        )
 
-        cb = self.trid_plot_vis.scene.mlab.colorbar(tmesh, nb_labels=6, label_fmt='%0.1f', orientation='vertical')
-        cb.label_text_property.font_family = 'times'
-        cb.label_text_property.bold = 0
-        cb.label_text_property.font_size = 2
+        points = np.column_stack((tdx, tdy, tdz))
+        mesh = pv.PolyData(points, faces)
+        mesh["scalars"] = tdmap  # vertex scalars
 
-        self.trid_incl_dsbox.setValue(self.DIP.params['incl'])
+        p = self.trid_plot_vis.plotter
+
+        if self._mesh_actor is None:
+            self._mesh_actor = p.add_mesh(
+                mesh,
+                scalars="scalars",
+                cmap="gist_heat",
+                clim=[self.vmin, self.vmax],
+                show_edges=False,  # kenar görmek istersen True + edge_color="black"
+                scalar_bar_args=dict(
+                    title="I / Iphot",
+                    n_labels=6,
+                    fmt="%.4f",
+                    vertical=False,
+                    title_font_size=15,
+                    label_font_size=15,
+                    width=0.60,  # bar genişliği (ekranın %60’ı)
+                    height=0.08,  # bar yüksekliği
+                    position_x=0.20,
+                    position_y=0.02,  # alta yakın
+                )
+            )
+        else:
+            self._mesh_actor.mapper.dataset = mesh
+            self._mesh_actor.mapper.scalar_range = (self.vmin, self.vmax)
+            self._mesh_actor.mapper.array_name = "scalars"
+
+        self._camera_y_plus_view(mesh)
+
+        self.trid_incl_dsbox.setValue(float(self.DIP.params['incl']))
+
         self.set_3d_plot_ori()
 
+        p.reset_camera_clipping_range()
+        p.update()
+
+    def _camera_y_plus_view(self, mesh: pv.PolyData):
+        """
+        +Y ekseninden orijine bakış.
+        """
+        p = self.trid_plot_vis.plotter
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        cx = 0.5 * (xmin + xmax)
+        cy = 0.5 * (ymin + ymax)
+        cz = 0.5 * (zmin + zmax)
+        diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
+
+        pos = (cx, cy + 2.0 * diag, cz)  # +Y tarafından bak
+        focal = (cx, cy, cz)
+        view_up = (0.0, 0.0, 1.0)  # Z yukarı
+
+        p.camera_position = [pos, focal, view_up]
+
     def set_3d_plot_ori(self):
+        """
+        Mayavi: mlab.view(azimuth, elevation, distance)
+        Azimuth (deg): XY düzleminde +X→+Y yönünde saat yönü tersi (Mayavi mantığına yakın),
+        Elevation (deg): XY düzleminden +Z yönüne doğru,
+        Distance: kamera-odak arası mesafe (mesh diyagonalına göre ölçeklenebilir).
+        """
+        azimuth = -1.0 * (self.trid_phase_dsbox.value() * 360.0)  # senin formülünü koruyorum
+        elevation = 90.0 - float(self.trid_incl_dsbox.value())
+        distance = float(self.trid_dis_dsbox.value())
 
-        azimuth = -1 * (self.trid_phase_dsbox.value() * 360)
-        elevation = self.trid_incl_dsbox.value()
-        distance = self.trid_dis_dsbox.value()
+        p = self.trid_plot_vis.plotter
+        if self._mesh_actor is None:
+            return
+        mesh = self._mesh_actor.mapper.dataset
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        cx = 0.5 * (xmin + xmax)
+        cy = 0.5 * (ymin + ymax)
+        cz = 0.5 * (zmin + zmax)
+        focal = (cx, cy, cz)
 
-        self.trid_plot_vis.scene.mlab.view(azimuth=azimuth, elevation=elevation, distance=distance)
+        diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
+        R = distance * diag * 0.2  # Mayavi'deki "distance" hissini korumak için diyagonalle ölçekle
 
-    def plot_lambda_search(self, lmbds, chisqs, mems, maxcurve):
+        az = math.radians(azimuth)
+        el = math.radians(elevation)
+
+        dx = R * math.cos(el) * math.cos(az)
+        dy = R * math.cos(el) * math.sin(az)
+        dz = R * math.sin(el)
+
+        cam_pos = (cx + dx, cy + dy, cz + dz)
+        view_up = (0.0, 0.0, 1.0)
+
+        p.camera_position = [cam_pos, focal, view_up]
+        p.reset_camera_clipping_range()
+        p.update()
+
+    def plot_lambda_search(self, lmbds, tchisqs, entropies, maxcurve):
 
         ax1 = self.lamda_search_plot.fig.axes[0]
 
         best_lmbd = lmbds[maxcurve]
 
-        ax1.plot(chisqs, mems, 'ko', ms=self.ms)
-        ax1.plot(chisqs[maxcurve], mems[maxcurve], 'ro', ms=self.ms + 1,
-                 label='Best lmbd=' + str(best_lmbd))
-        ax1.set_xlabel('$\chi^2$', fontsize=self.fs)
+        ax1.plot(tchisqs, entropies, 'ko', ms=self.ms)
+        ax1.plot(tchisqs[maxcurve], entropies[maxcurve], 'ro', ms=self.ms + 1, label='Best lmbd=' + str(best_lmbd))
+        ax1.set_xlabel(r'$\chi^2$', fontsize=self.fs)
         ax1.set_ylabel('Entropy', fontsize=self.fs)
 
         ax1.tick_params(axis='both', labelsize=self.tls)
