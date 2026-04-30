@@ -1,7 +1,7 @@
-import os
 from setuptools import setup, find_packages, Extension
 from Cython.Build import cythonize
 import numpy as np
+import os
 
 
 def get_version():
@@ -34,36 +34,29 @@ setup(
     },
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
         "Operating System :: Microsoft :: Windows",
         "Operating System :: POSIX :: Linux",
     ],
     python_requires=">=3.8",
     install_requires=[
-        "numpy==1.26.4",
-        "scipy==1.12.0",
+        "numpy",
+        "scipy",
         "Cython",
         "matplotlib",
-        "basemap==1.4.1",
+        "basemap",
         "astropy",
         "PyAstronomy",
         "exotic_ld",
-        "PyDynamic",
         "tqdm",
         "PyQt5",
-        "PyQt5-Qt!=5.15.14",
         "phoebe",
         "kneebow",
-        "mayavi==4.8.2",
-        "traits",
-        "traitsui",
-        "vtk==9.3.0",
-        "configobj",
         "jax",
         "jaxopt",
         'healpy; platform_system=="Linux"',
+        "screeninfo",
     ],
-    setup_requires=['wheel', "Cython"],
+    license="GPL-3.0-or-later",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     ext_modules=cythonize(extensions),
