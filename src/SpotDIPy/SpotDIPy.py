@@ -3,17 +3,20 @@ import sys
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
-from jax import vmap, config as jax_config, numpy as jnp
+import jax
+from jax import vmap, config as jax_config, numpy as jnp, debug as jax_debug
 from jaxopt import ScipyBoundedMinimize
 from astropy import units as au, constants as ac
 import platform
 import copy
 from PyQt5 import QtWidgets
-from . import utils as dipu
-# import utils as dipu
-from .plot_GUI import PlotGUI
-# from plot_GUI import PlotGUI
-from jax.scipy.stats import norm
+try:
+    from . import utils as dipu
+    from .plot_GUI import PlotGUI
+except ImportError:
+    import utils as dipu
+    from plot_GUI import PlotGUI
+from functools import partial
 
 
 class SpotDIPy:
@@ -31,9 +34,9 @@ class SpotDIPy:
             The default is 1.
         platform_name : str, optional
             The computation platform used during the optimization process to find the best-fitting model to the
-            observational data, either 'cpu' or 'gpu'. The default is 'cpu'. This setting does not affect other
+            observational data, either 'cpu' or 'cuda'. The default is 'cpu'. This setting does not affect other
             parallelization tasks.
-            Note: If 'gpu' is selected and the code is executed multiple times simultaneously, there is a possibility
+            Note: If 'cuda' is selected and the code is executed multiple times simultaneously, there is a possibility
             of running out of GPU memory, which may cause the code to stop execution. This is particularly relevant when
             using the grid_search function.
         info : bool, optional
@@ -44,7 +47,7 @@ class SpotDIPy:
         ValueError
             If cpu_num is not an integer.
         KeyError
-            If platform_name is not 'cpu' or 'gpu'.
+            If platform_name is not 'cpu' or 'cuda'.
         KeyError
             If info is not True or False.
         """
@@ -53,11 +56,15 @@ class SpotDIPy:
             raise ValueError("'cpu_num' keyword must be an integer number")
         self.cpu_num = int(cpu_num)
 
-        if platform_name not in ['cpu', 'gpu']:
-            raise KeyError("'platform_name' keyword must be one of two options: 'cpu' or 'gpu'")
+        if platform_name not in ['cpu', 'cuda']:
+            raise KeyError("'platform_name' keyword must be one of two options: 'cpu' or 'cuda'")
 
         if info not in [True, False]:
             raise KeyError("'info' keyword must be one of two options: True or False")
+
+        self.platform_name = platform_name
+        if platform_name == 'cuda':
+            platform_name += ",cpu"
 
         jax_config.update("jax_platforms", platform_name)
         jax_config.update("jax_enable_x64", True)
@@ -77,7 +84,8 @@ class SpotDIPy:
             'vrt': None,
             'mass': None,
             'dOmega': None,
-            'resolution': None
+            'resolution': None,
+            'gd_beta': None
         }
 
         def_conf_temp = {
@@ -104,6 +112,7 @@ class SpotDIPy:
             'noo': 0,
             'nop': None,
             'snr': None,
+            'read_noise': 5.,
             'lp_vels': None,
             'phot_lp_data_raw': None,
             'cool_lp_data_raw': None,
@@ -120,30 +129,28 @@ class SpotDIPy:
                 'norsp': None,
                 'noo': 1,
                 'nop': None,
-                'snr': None
+                'snr': None,
+                'read_noise': 5.
             }
         }
 
         self.opt_stats = {
             'Chi-square for Line Profile(s)': None,
-            'Chi-square for Molecular(1) Profile(s)': None,
-            'Chi-square for Molecular(2) Profile(s)': None,
             'Chi-square for Light Curve Profile': None,
             'Alpha * Line Profile(s) Chi-square': None,
-            'Beta * Molecular(1) Profile(s) Chi-square': None,
-            'Gamma * Molecular(2) Profile(s) Chi-square': None,
             'Delta * Light Curve Profile Chi-square': None,
             'Total Weighted Chi-square': None,
-            'Total Entropy': None,
-            'Lambda * Total Entropy': None,
-            'p-value': None,
+            'Entropy': None,
+            'Lambda * Entropy': None,
+            'RMS of Line Residauls': None,
+            'RMS of Light Curve Residauls': None,
+            'Total RMS of Residauls': None,
             'Loss Function Value': None
         }
 
         self.opt_results = {'line': {}, 'mol1': {}, 'mol2': {}, 'lc': {}, 'lmbds': []}
         self.ldi = {'ld_params': {}, 'line': {}, 'mol1': {}, 'mol2': {}, 'lc': {}}
         self.surface_grid = {}
-        self.com_times = []
 
         self.fsl = 1e-7
         self.fsu = 1.0 - self.fsl
@@ -162,7 +169,7 @@ class SpotDIPy:
             - 'Tcool': Temperature of cooler regions (in Kelvin).
             - 'Thot': Temperature of hotter regions (in Kelvin).
             - 'incl': Inclination angle of the star's rotational axis (in degrees).
-            - 'R': Stellar radius (in solar radius).
+            - 'R': Stellar equator radius (in solar radius).
             - 'vsini': Projected rotational velocity (in km/s).
             - 'vrt': Radial-tangential macroturbulence velocity (in km/s).
             - 'mass': Stellar mass (in solar masses).
@@ -299,23 +306,24 @@ class SpotDIPy:
                                                              " in Angstrom")
 
                             if par == 'eqw':
-                                if isinstance(conf[mode][par], dict):
-                                    if sorted(list(conf[mode][par].keys())) != sorted(['phot', 'cool', 'hot']):
-                                        raise KeyError(common_eqw_err)
+                                if conf[mode][par] is not None:
+                                    if isinstance(conf[mode][par], dict):
+                                        if sorted(list(conf[mode][par].keys())) != sorted(['phot', 'cool', 'hot']):
+                                            raise KeyError(common_eqw_err)
 
-                                    for subpar in conf[mode][par]:
-                                        if not dipu.isfloatable(conf[mode][par][subpar]):
+                                        for subpar in conf[mode][par]:
+                                            if not dipu.isfloatable(conf[mode][par][subpar]):
+                                                raise ValueError(common_eqw_err)
+
+                                            elif float(conf[mode][par][subpar]) <= 0.0:
+                                                raise ValueError(common_eqw_err)
+
+                                    else:
+                                        if not dipu.isfloatable(conf[mode][par]):
                                             raise ValueError(common_eqw_err)
 
-                                        elif float(conf[mode][par][subpar]) <= 0.0:
+                                        elif float(conf[mode][par]) <= 0.0:
                                             raise ValueError(common_eqw_err)
-
-                                else:
-                                    if not dipu.isfloatable(conf[mode][par]):
-                                        raise ValueError(common_eqw_err)
-
-                                    elif float(conf[mode][par]) <= 0.0:
-                                        raise ValueError(common_eqw_err)
 
                             if par == 'corr':
                                 if isinstance(conf[mode][par], dict) and len(conf[mode][par]) > 0:
@@ -360,9 +368,10 @@ class SpotDIPy:
         self.surface_grid['init_noes'], self.surface_grid['nlats'], self.surface_grid['nside'] = noes, nlats, nside
 
         if self.params['R'] is None:
-            radius = dipu.calc_radius(vsini=self.params['vsini'], incl=self.params['incl'], period=self.params['period'])
+            radius_eq = dipu.calc_radius(vsini=self.params['vsini'], incl=self.params['incl'], period=self.params['period'])
         else:
-            radius = self.params['R']
+            radius_eq = self.params['R']
+        self.radius_eq = radius_eq
 
         methods = ['trapezoid', 'phoebe2_marching', 'healpy']
         if method not in methods:
@@ -371,7 +380,8 @@ class SpotDIPy:
 
         try:
             omega, requiv, rp = dipu.calc_omega_and_requiv(mass=self.params['mass'], period=self.params['period'],
-                                                           re=radius)
+                                                           re=radius_eq)
+            self.omega = omega
         except:
             raise ValueError("The rotation rate cannot be calculated! Probably, one or more of the 'R', 'vsini',"
                              " 'incl', 'period', and 'mass' parameters are not in the appropriate values.")
@@ -387,33 +397,39 @@ class SpotDIPy:
                                   period=self.params['period'], mass=self.params['mass'])
 
         elif method == 'trapezoid':
-            dipu.td_surface_grid(container=self.surface_grid, omega=omega, nlats=nlats, radius=radius,
+            dipu.td_surface_grid(container=self.surface_grid, omega=omega, nlats=nlats, radius=radius_eq,
                                  mass=self.params['mass'], cpu_num=self.cpu_num)
 
         elif method == 'healpy':
             if platform.system() == "Windows":
                 raise OSError("'healpy' is not supported on Windows. Please select 'trapezoid' or 'phoebe2_marching'")
             else:
-                dipu.hp_surface_grid(container=self.surface_grid, omega=omega, nside=nside, radius=radius,
+                dipu.hp_surface_grid(container=self.surface_grid, omega=omega, nside=nside, radius=radius_eq,
                                      mass=self.params['mass'], cpu_num=self.cpu_num)
 
-        self.surface_grid['gds'] = dipu.calc_gds(omega=omega, thetas=self.surface_grid['grid_lats'] + np.pi / 2.0)
+        if self.params['gd_beta'] is not None:
+            gdcs = dipu.calc_gds_classic(self.surface_grid['grid_loggs'], beta=self.params['gd_beta'])
+        else:
+            gdcs = dipu.calc_gds_LR(omega=omega, thetas=self.surface_grid['grid_lats'] + np.pi / 2.0)
+
+        self.surface_grid['Tgdc'], self.surface_grid['Fgdc'] = gdcs
         self.surface_grid['noes'] = len(self.surface_grid['grid_lats'])
         self.surface_grid['coslats'] = np.cos(self.surface_grid['grid_lats'])
         self.surface_grid['sinlats'] = np.sin(self.surface_grid['grid_lats'])
         self.surface_grid['cosi'] = np.cos(np.deg2rad(self.params['incl']))
         self.surface_grid['sini'] = np.sin(np.deg2rad(self.params['incl']))
+        self.surface_grid['norm_grid_areas'] = self.surface_grid['grid_areas'] / np.sum(self.surface_grid['grid_areas'])
 
         if self.params['R'] is None:
             veq = self.params['vsini'] / self.surface_grid['sini']
         else:
-            veq = (2.0 * np.pi * (radius * au.solRad.to(au.km))) / (self.params['period'] * au.day.to(au.second))
+            veq = (2.0 * np.pi * (radius_eq * au.solRad.to(au.km))) / (self.params['period'] * au.day.to(au.second))
             self.params['vsini'] = veq * self.surface_grid['sini']
 
         if info:
             print('\033[96mNumber of total surface element:\033[0m', self.surface_grid['noes'])
             if self.params['R'] is None:
-                print('\033[96mEquatorial radius:\033[0m', np.round(radius, 3), 'SolRad')
+                print('\033[96mEquatorial radius:\033[0m', np.round(radius_eq, 3), 'SolRad')
             else:
                 print('\033[96mProjected equatorial rotational velocity:\033[0m',
                       np.round(self.params['vsini'], 3), 'km/s')
@@ -421,37 +437,42 @@ class SpotDIPy:
             print('\033[96mMean surface gravity:\033[0m', np.round(np.mean(self.surface_grid['grid_loggs']), 2),
                   'dex')
 
-        self.surface_grid['ctps'] = self.params['Tphot'] * self.surface_grid['gds']
-        self.surface_grid['ctcs'] = self.params['Tcool'] * self.surface_grid['gds']
-        self.surface_grid['cths'] = self.params['Thot'] * self.surface_grid['gds']
+        self.surface_grid['ctps'] = self.params['Tphot'] * self.surface_grid['Tgdc']
+        self.surface_grid['ctcs'] = self.params['Tcool'] * self.surface_grid['Tgdc']
+        self.surface_grid['cths'] = self.params['Thot'] * self.surface_grid['Tgdc']
 
         if test:
             xyzs = self.surface_grid['grid_xyzs']
             if self.surface_grid['method'] == 'p2m':
-                scalars1 = self.surface_grid['gds'].copy()
+                scalars1 = self.surface_grid['Fgdc'].copy()
                 scalars2 = self.surface_grid['grid_areas'].copy()
                 scalars3 = self.surface_grid['grid_lats'].copy()
                 scalars4 = self.surface_grid['grid_longs'].copy()
 
             else:
-                scalars1 = np.repeat(self.surface_grid['gds'], 2)
+                scalars1 = np.repeat(self.surface_grid['Fgdc'], 2)
                 scalars2 = np.repeat(self.surface_grid['grid_areas'], 2)
                 scalars3 = np.repeat(self.surface_grid['grid_lats'], 2)
                 scalars4 = np.repeat(self.surface_grid['grid_longs'], 2)
 
-            dipu.grid_test(xyzs=xyzs, scalars=scalars1, title='Gravity Darkening Distribution', show=False)
-            dipu.grid_test(xyzs=xyzs, scalars=scalars2, title='Surface Element Area Distribution', show=False)
-            dipu.grid_test(xyzs=xyzs, scalars=scalars3, title='Latitude Distribution', show=False)
-            dipu.grid_test(xyzs=xyzs, scalars=scalars4, title='Longitude Distribution')
+            dipu.grid_test(xyzs=xyzs, scalars=scalars1, bar_title='Gravity Darkening Coeffs.',
+                           win_title='Gravity Darkening Coeffs. Distribution')
+            dipu.grid_test(xyzs=xyzs, scalars=scalars2, bar_title='Area (SolRad^2)',
+                           win_title='Surface Element Area Distribution')
+            dipu.grid_test(xyzs=xyzs, scalars=scalars3, bar_title='Latitude (radians)',
+                           win_title='Latitude Distribution')
+            dipu.grid_test(xyzs=xyzs, scalars=scalars4, bar_title='Longitude (radians)',
+                           win_title='Longitude Distribution')
 
     def prep_ld_and_int_lpt(self, info=False, grid_search=False):
 
         if info:
             print('\033[92m' + 'Preparing limb-darkening and intensity lookup table...' + '\033[0m')
 
-        teffcs = self.surface_grid['ctcs'].copy()
-        teffhs = self.surface_grid['cths'].copy()
-        teffps = self.surface_grid['ctps'].copy()
+        teffps = np.full(self.surface_grid['noes'], self.params['Tphot'])
+        teffcs = np.full(self.surface_grid['noes'], self.params['Tcool'])
+        teffhs = np.full(self.surface_grid['noes'], self.params['Thot'])
+
         loggs = self.surface_grid['grid_loggs'].copy()
 
         for mode in self.conf:
@@ -462,6 +483,9 @@ class SpotDIPy:
                                             data_path=self.ldi['ld_params']['data_path'],
                                             mu_min=self.ldi['ld_params']['mu_min'], cpu_num=self.cpu_num)
 
+                ld_rgi['phot'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['cool'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['hot'][-1] *= self.surface_grid['Fgdc']
                 self.ldi[mode] = ld_rgi
 
             else:
@@ -471,6 +495,9 @@ class SpotDIPy:
                                             data_path=self.ldi['ld_params']['data_path'],
                                             mu_min=self.ldi['ld_params']['mu_min'],  cpu_num=self.cpu_num)
 
+                ld_rgi['phot'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['cool'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['hot'][-1] *= self.surface_grid['Fgdc']
                 self.ldi[mode] = ld_rgi
 
         if not grid_search:
@@ -488,6 +515,9 @@ class SpotDIPy:
                                             data_path=self.ldi['ld_params']['data_path'],
                                             mu_min=self.ldi['ld_params']['mu_min'], cpu_num=self.cpu_num)
 
+                ld_rgi['phot'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['cool'][-1] *= self.surface_grid['Fgdc']
+                ld_rgi['hot'][-1] *= self.surface_grid['Fgdc']
                 self.ldi['lc'] = ld_rgi
 
         if info:
@@ -522,40 +552,10 @@ class SpotDIPy:
         for mode in self.conf:
             tnoo += self.idc[mode]['noo']
             for item in self.conf[mode]['corr']:
-                if self.conf[mode]['corr'][item] == 'free':
+                if isinstance(self.conf[mode]['corr'][item], str) and self.conf[mode]['corr'][item] == 'free':
                     nofp += self.idc[mode]['noo']
         self.idc['nofp'] = nofp
         self.idc['tnoo'] = tnoo
-
-        # dmask = np.zeros(self.surface_grid['noes'] * 3 + nofp, dtype=bool)
-        dmask = np.zeros(self.surface_grid['noes'] * 2 + nofp, dtype=bool)
-        cmask = dmask.copy()
-        for mode in self.conf:
-            noo = self.idc[mode]['noo']
-
-            for parn in self.conf[mode]['corr']:
-                if self.conf[mode]['corr'][parn] == 'free':
-
-                    if not cmask.any():
-                        cmask = dmask.copy()
-                        # cmask[3 * self.surface_grid['noes']: 3 * self.surface_grid['noes'] + noo] = True
-                        cmask[2 * self.surface_grid['noes']: 2 * self.surface_grid['noes'] + noo] = True
-
-                    else:
-                        ind = max(np.where(cmask)[0]) + 1
-                        cmask = dmask.copy()
-                        cmask[ind: ind + noo] = True
-
-                    self.conf[mode]['mask'][parn] = cmask.copy()
-
-                elif isinstance(self.conf[mode]['corr'][parn], (tuple, list, np.ndarray)):
-                    self.conf[mode]['corr'][parn] = np.array(self.conf[mode]['corr'][parn])[:, None]
-
-                elif self.conf[mode]['corr'][parn] is None:
-                    self.conf[mode]['corr'][parn] = np.array([None] * noo)[:, None]
-
-                else:
-                    self.conf[mode]['corr'][parn] = np.array([self.conf[mode]['corr'][parn]] * noo)[:, None]
 
     def prepare_lps(self, info=False):
 
@@ -590,435 +590,379 @@ class SpotDIPy:
                                                                          ints=self.idc[mode][item + '_lp_data'],
                                                                          eqw=eqw)
 
-    def calc_pixel_coeffs(self, mode=None, line_times=None, mol1_times=None, mol2_times=None, lc_times=None, info=True,
-                          plps=(True, True), plil=(True, True, False)):
+    def _ensure_f64(self, *arrays):
+        """Convert all inputs to float64 ndarrays."""
+        return tuple(np.asarray(a, dtype=np.float64) for a in arrays)
 
-        plats = (2.0 * np.pi * self.params['period'] / (2.0 * np.pi - self.params['period'] * self.params['dOmega'] *
-                                                        self.surface_grid['sinlats'] ** 2))
-        vlats = (2.0 * np.pi * self.surface_grid['grid_rs'] * au.solRad.to(au.km) * self.surface_grid['coslats'] /
+    def calc_pixel_coeffs(self, mode=None, line_times=None, lc_times=None,
+                          info=True, plps=(True, True), plil=(True, True, False)):
+
+        sg = self.surface_grid
+        p = self.params
+
+        # --- Differential rotation periods & velocities ---
+        plats = (2.0 * np.pi * p['period'] /
+                 (2.0 * np.pi - p['period'] * p['dOmega'] * sg['sinlats'] ** 2))
+        vlats = (2.0 * np.pi * sg['grid_rs'] * au.solRad.to(au.km) * sg['coslats'] /
                  (plats * au.day.to(au.second)))
 
-        areas = self.surface_grid['grid_areas']
-
-        cpcs = {}
-
-        all_times = {'line': line_times, 'mol1': mol1_times, 'mol2': mol2_times, 'lc': lc_times}
-
+        # --- Prep steps (conditional) ---
         if plil[0]:
             self.prep_ld_and_int_lpt(info=plil[1], grid_search=plil[2])
-
         if plps[0]:
             self.prepare_lps(info=plps[1])
 
-        if mode is None:
-            modes = list(self.conf.keys())
-        else:
-            modes = [mode]
+        # --- Resolve modes & times ---
+        modes = list(self.conf.keys()) if mode is None else [mode]
+        all_times = {'line': line_times, 'lc': lc_times}
 
-        com_times = []
-        for k in range(len(modes)):
-            com_times += list(all_times[modes[k]])
-        com_times = np.unique(com_times)
+        com_times = np.unique(np.concatenate([all_times[m] for m in modes]))
         if mode is None:
             self.com_times = com_times.copy()
 
+        # --- Precompute shared arrays once ---
+        incl = np.deg2rad(p['incl'])
+        plats_f, areas_f, lats_f, longs_f = self._ensure_f64(
+            plats, sg['grid_areas'], sg['grid_lats'], sg['grid_longs']
+        )
+
         if info:
-            print('\033[92m' + 'Calculating the coefficients related to the surface elements...' + '\033[0m')
+            print('\033[92mCalculating the coefficients related to the surface elements...\033[0m')
 
-        for mode in modes:
+        cpcs = {}
+        for m in modes:
             if info:
-                if mode == 'line':
-                    print('\033[1m' + 'Atomic line profile(s)...' + '\033[0m')
+                label = 'Atomic line profile(s)' if m == 'line' else 'Light curve profile'
+                print(f'\033[1m{label}...\033[0m')
 
-                elif mode == 'mol1':
-                    print('\033[1m' + 'Molecular band profile(s) (1)...' + '\033[0m')
+            rgi = self.ldi[m]
+            ldcs_phot_f, ldcs_cool_f, ldcs_hot_f = self._ensure_f64(
+                np.array(rgi['phot'][:2]).T,
+                np.array(rgi['cool'][:2]).T,
+                np.array(rgi['hot'][:2]).T,
+            )
+            lis_phot_f, lis_cool_f, lis_hot_f = self._ensure_f64(
+                rgi['phot'][-1], rgi['cool'][-1], rgi['hot'][-1]
+            )
 
-                elif mode == 'mol2':
-                    print('\033[1m' + 'Molecular band profile(s) (2)...' + '\033[0m')
+            times = all_times[m]
 
-                elif mode == 'lc':
-                    print('\033[1m' + 'Light curve profile...' + '\033[0m')
+            # --- Shared arrays: passed once via Pool initializer ---
+            shared = {
+                'plats': plats_f, 'ldcs_phot': ldcs_phot_f,
+                'ldcs_cool': ldcs_cool_f, 'ldcs_hot': ldcs_hot_f,
+                'lis_phot': lis_phot_f, 'lis_cool': lis_cool_f,
+                'lis_hot': lis_hot_f, 'areas': areas_f,
+                'lats': lats_f, 'longs': longs_f,
+                't0': p['t0'], 'incl': incl,
+                'ld_law': self.ldi['ld_params']['law'],
+                'noes': sg['noes'], 'period': p['period'],
+            }
 
-            rgi = self.ldi[mode]
+            if m != 'lc':
+                vlats_f, lp_vels_f, phot_lp_f, cool_lp_f, hot_lp_f, vels_f = self._ensure_f64(
+                    vlats,
+                    self.idc[m]['lp_vels'], self.idc[m]['phot_lp_data'],
+                    self.idc[m]['cool_lp_data'], self.idc[m]['hot_lp_data'],
+                    self.idc[m]['vels'],
+                )
+                shared.update({
+                    'vlats': vlats_f, 'nop': self.idc[m]['nop'],
+                    'lp_vels': lp_vels_f, 'phot_lp': phot_lp_f,
+                    'cool_lp': cool_lp_f, 'hot_lp': hot_lp_f,
+                    'vrt': p['vrt'], 'vels': vels_f,
+                })
 
-            ldcs_phot = np.array(rgi['phot'][:2]).T
-            ldcs_cool = np.array(rgi['cool'][:2]).T
-            ldcs_hot = np.array(rgi['hot'][:2]).T
+            # --- Per-timestep args: only the varying parts ---
+            per_ts = [(t, i, info) for i, t in enumerate(times)]
 
-            lis_phot = rgi['phot'][-1]
-            lis_cool = rgi['cool'][-1]
-            lis_hot = rgi['hot'][-1]
+            results = dipu.mp_calc_pixel_coeffs(
+                cpu_num=self.cpu_num, shared_arrays=shared,
+                per_timestep_args=per_ts, mode=m,
+            )
 
-            nop = self.idc[mode]['nop']
-
-            times = all_times[mode]
-
-            noes = self.surface_grid['noes']
-            grid_lats = self.surface_grid['grid_lats']
-            grid_longs = self.surface_grid['grid_longs']
-            t0 = self.params['t0']
-            period = self.params['period']
-            incl = np.deg2rad(self.params['incl'])
-            ld_law = self.ldi['ld_params']['law']
-
-            if mode != 'lc':
-                lp_vels = self.idc[mode]['lp_vels']
-                phot_lp_data = self.idc[mode]['phot_lp_data']
-                cool_lp_data = self.idc[mode]['cool_lp_data']
-                hot_lp_data = self.idc[mode]['hot_lp_data']
-                vrt = self.params['vrt']
-                vels = self.idc[mode]['vels']
-
-                input_args_spec = [(itime, np.asarray(plats, dtype=np.float64), np.asarray(vlats, dtype=np.float64),
-                                    np.asarray(ldcs_phot, dtype=np.float64), np.asarray(ldcs_cool, dtype=np.float64),
-                                    np.asarray(ldcs_hot, dtype=np.float64), np.asarray(lis_phot, dtype=np.float64),
-                                    np.asarray(lis_cool, dtype=np.float64), np.asarray(lis_hot, dtype=np.float64),
-                                    np.asarray(areas, dtype=np.float64), np.asarray(grid_lats, dtype=np.float64),
-                                    np.asarray(grid_longs, dtype=np.float64), nop, t0, incl, ld_law, noes,
-                                    np.asarray(lp_vels, dtype=np.float64), np.asarray(phot_lp_data, dtype=np.float64),
-                                    np.asarray(cool_lp_data, dtype=np.float64), np.asarray(hot_lp_data, dtype=np.float64),
-                                    vrt, np.asarray(vels, dtype=np.float64), period, info) for itime in times]
-
-                results = dipu.mp_calc_pixel_coeffs(cpu_num=self.cpu_num, input_args=input_args_spec, mode=mode)
-
-            if mode == 'lc':
-                input_args_lc = [(itime, np.asarray(plats, dtype=np.float64), np.asarray(ldcs_phot, dtype=np.float64),
-                                  np.asarray(ldcs_cool, dtype=np.float64), np.asarray(ldcs_hot, dtype=np.float64),
-                                  np.asarray(lis_phot, dtype=np.float64), np.asarray(lis_cool, dtype=np.float64),
-                                  np.asarray(lis_hot, dtype=np.float64), np.asarray(areas, dtype=np.float64),
-                                  np.asarray(grid_lats, dtype=np.float64), np.asarray(grid_longs, dtype=np.float64),
-                                  t0, incl, ld_law, noes, period, info) for itime in times]
-
-                results = dipu.mp_calc_pixel_coeffs(cpu_num=self.cpu_num, input_args=input_args_lc, mode=mode)
-
-            cpcs[mode] = {'coeffs_cube': np.array(results), 'times': {}}
-            for i, itime in enumerate(times):
-                cpcs[mode]['times'][itime] = np.array(results[i])
+            results_arr = np.array(results)
+            cpcs[m] = {
+                'coeffs_cube': results_arr,
+                'times': {t: results_arr[i] for i, t in enumerate(times)},
+            }
 
         return cpcs
 
-    def generate_synthetic_profile(self, fssc, fssh, rv, amp, coeffs_cube, mode, lib=np):
-
-        nop = self.idc[mode]['nop']
+    def generate_synthetic_profile(self, fssc, fssh, coeffs_cube, rv=None, vels=None, amp=None):
 
         fssp = 1.0 - (fssc + fssh)
 
+        profiles = coeffs_cube[:, 3:]
+        nop = profiles.shape[1] // 3
+        p_phot, p_cool, p_hot = profiles[:, :nop], profiles[:, nop:2 * nop], profiles[:, 2 * nop:]
+
         wgt_phot = coeffs_cube[:, 0] * fssp
-        wgtn_phot = lib.sum(wgt_phot)
-
         wgt_cool = coeffs_cube[:, 1] * fssc
-        wgtn_cool = lib.sum(wgt_cool)
-
         wgt_hot = coeffs_cube[:, 2] * fssh
-        wgtn_hot = lib.sum(wgt_hot)
 
-        prf = lib.sum(wgt_phot[:, None] * coeffs_cube[:, 3: 3 + nop] +
-                      wgt_cool[:, None] * coeffs_cube[:, 3 + nop: 3 + 2 * nop] +
-                      wgt_hot[:, None] * coeffs_cube[:, 3 + 2 * nop:], axis=0)
-        prf /= wgtn_phot + wgtn_cool + wgtn_hot
-
-        vels = self.idc[mode]['vels'].copy()
+        prf = jnp.sum(wgt_phot[:, None] * p_phot +
+                      wgt_cool[:, None] * p_cool +
+                      wgt_hot[:, None] * p_hot, axis=0)
+        prf /= jnp.sum(wgt_phot + wgt_cool + wgt_hot)
 
         if rv is not None:
-            prf = lib.interp(vels, vels + rv, prf)
+            prf = jnp.interp(vels, vels + rv, prf)
 
         if amp is not None:
             prf = prf + amp
-            # prf = (prf - lib.median(prf)) * amp + 1.0
 
-        scaling = self.conf[mode]['scaling'].copy()
-        wrange = self.conf[mode]['wave_range'].copy()
+        prf /= jnp.mean(prf)
 
-        max_reg = [1.0]
-        scale_factor = 1.0
-        if scaling['method'] == 'mean':
-            scale_factor = lib.mean(prf)
+        return prf
 
-        elif scaling['method'] == 'max':
-            per = 100. / scaling['percent']
-            if scaling['side'] == 'both':
-                max_reg = lib.hstack((prf[:int(len(prf) / per)], prf[-int(len(prf) / per):]))
-            elif scaling['side'] == 'left':
-                max_reg = prf[:int(len(prf) / per)]
-            elif scaling['side'] == 'right':
-                max_reg = prf[-int(len(prf) / per):]
-            scale_factor = lib.mean(max_reg)
-
-        elif scaling['method'] == 'none':
-            scale_factor = 1.0
-
-        elif scaling['method'] == 'region':
-            wavs = (vels * lib.mean(wrange)) / ac.c.to(au.kilometer / au.second).value + lib.mean(wrange)
-
-            wavgw = lib.array(
-                [lib.mean(wavs[lib.where((wavs >= region[0]) & (wavs <= region[1]))]) for region in
-                 scaling['ranges']])
-            wavgf = lib.array(
-                [lib.mean(prf[lib.where((wavs >= region[0]) & (wavs <= region[1]))]) for region in
-                 scaling['ranges']])
-
-            x1, x2, x3 = wavgw
-            y1, y2, y3 = wavgf
-            denom = (x1 - x2) * (x1 - x3) * (x2 - x3)
-            a = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / denom
-            b = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / denom
-            c = (x2 * x3 * (x2 - x3) * y1 + x3 * x1 * (x3 - x1) * y2 + x1 * x2 * (x1 - x2) * y3) / denom
-            scale_factor = a * wavs ** 2 + b * wavs + c
-
-        prf = prf / scale_factor
-
-        return prf, scale_factor
-
-    def generate_synthetic_lightcurve(self, fssc, fssh, coeffs_cube, amp=None, lib=np):
+    def generate_synthetic_lightcurve(self, fssc, fssh, coeffs_cube, amp=None):
 
         fssp = 1.0 - (fssc + fssh)
 
-        wgt_phot = coeffs_cube[:, 0] * fssp
-        wgt_cool = coeffs_cube[:, 1] * fssc
-        wgt_hot = coeffs_cube[:, 2] * fssh
-
-        flux = lib.sum(wgt_phot + wgt_cool + wgt_hot)
+        flux = jnp.sum(coeffs_cube[:, 0] * fssp +
+                       coeffs_cube[:, 1] * fssc +
+                       coeffs_cube[:, 2] * fssh)
 
         if amp is not None:
             flux += amp
 
         return flux
 
-    # def norm_x0s(self, x0s):
-    #
-    #     noes = self.surface_grid['noes']
-    #
-    #     fssc = x0s[:noes]
-    #     fssh = x0s[noes:2 * noes]
-    #     fssp = x0s[2 * noes:3 * noes]
-    #
-    #     fsst = fssc + fssh + fssp
-    #     fssc /= fsst
-    #     fssh /= fsst
-    #     fssp /= fsst
-    #
-    #     return fssc, fssh, fssp
+    def entropy(self, fssc, fssh, fssp, wp, fsl):
 
-    def custom_kstest(self, data, cdf='norm', loc=0, scale=1):
-        """
-        Custom implementation of the Kolmogorov-Smirnov test.
+        return jnp.sum(
+            wp * (
+                    fssc * jnp.log(fssc / fsl) +
+                    fssh * jnp.log(fssh / fsl) +
+                    (1.0 - fssp) * jnp.log((1.0 - fssp) / fsl)
+            )
+        )
 
-        Parameters:
-            data (array-like): The observed data.
-            cdf (str): The name of the theoretical distribution (default is 'norm' for normal distribution).
-            loc (float): Mean of the theoretical distribution (default is 0 for standard normal).
-            scale (float): Standard deviation of the theoretical distribution (default is 1 for standard normal).
-
-        Returns:
-            D (float): The KS statistic (maximum difference).
-            p_value (float): The p-value for the test.
-        """
-        # Sort the data
-        data = jnp.sort(data)
-
-        # Compute the empirical CDF
-        n = len(data)
-        ecdf = jnp.arange(1, n + 1) / n
-
-        # Compute the theoretical CDF for the given distribution
-        if cdf == 'norm':
-            theoretical_cdf = norm.cdf(data, loc=loc, scale=scale)
-        else:
-            raise ValueError(f"Unsupported CDF: {cdf}")
-
-        # Compute the KS statistic (maximum absolute difference)
-        D_plus = ecdf - theoretical_cdf
-        D_minus = theoretical_cdf - jnp.arange(0, n) / n
-        D = np.max(jnp.maximum(D_plus, D_minus))
-
-        # Compute the p-value
-        sqrt_n = jnp.sqrt(n)
-        lambda_ = (sqrt_n + 0.12 + 0.11 / sqrt_n) * D
-        p_value = 0
-        for k in range(100):
-            p_value += (-1) ** k * 2.0 * jnp.exp(-2.0 * lambda_ ** 2.0 * (k + 1.0) ** 2.0)
-
-        return D, p_value
-
-    def entropy(self, fssc, fssh, fssp, wp):
-
-        memc = jnp.sum(wp * fssc * jnp.log(fssc / self.fsl))
-        memh = jnp.sum(wp * fssh * jnp.log(fssh / self.fsl))
-        memp = jnp.sum(wp * (1.0 - fssp) * jnp.log((1.0 - fssp) / self.fsl))
-        mem = (memc + memh + memp)
-
-        return mem
-
-    def objective_func(self, x0s, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs):
-
-        # fssc, fssh, fssp = self.norm_x0s(x0s)
-
-        noes = self.surface_grid['noes']
+    def _unpack_surface(self, x0s, noes):
         fssc = x0s[:noes]
         fssh = x0s[noes:2 * noes]
         fssp = 1.0 - (fssc + fssh)
+        return fssp, fssc, fssh
 
-        chisqs = {'line': 0.0, 'mol1': 0.0, 'mol2': 0.0, 'lc': 0.0}
-        # std_dev = {'line': 0.0, 'mol1': 0.0, 'mol2': 0.0, 'lc': 0.0}
-        # mean_err = {'line': 0.0, 'mol1': 0.0, 'mol2': 0.0, 'lc': 0.0}
-        p_value = 0
-        ks_stat = 0
+    def _chi2_rms(self, data, model):
+        res = data[0] - model
+        chi2 = jnp.mean((res / data[1]) ** 2)
+        rms = jnp.sqrt(jnp.mean(res ** 2))
+        return chi2, rms
 
-        for mode in self.conf:
-            if mode != 'lc':
-                pnoo = self.idc[mode]['noo']
-                pnop = self.idc[mode]['nop']
+    def _objective(self, x0s, *, data_line=None, coeffs_line=None, alpha=1.0, data_lc=None, coeffs_lc=None, delta=1.0,
+                   rv_line=None, vels_line=None, amp_line=None, amp_lc=None, lmbd=None, rv_line_mask=None, amp_line_mask=None,
+                   amp_lc_mask=None, noes=None, norm_grid_areas=None, fsl=None, disp=None):
 
-                rv = self.conf[mode]['corr']['rv']
-                if isinstance(rv, str) and rv == 'free':
-                    rv = x0s[self.conf[mode]['mask']['rv']]
-                rv_axis = None if None in rv else 0
-                rv = None if None in rv else rv
+        fssp, fssc, fssh = self._unpack_surface(x0s, noes)
 
-                amp = self.conf[mode]['corr']['amp']
-                if isinstance(amp, str) and amp == 'free':
-                    amp = x0s[self.conf[mode]['mask']['amp']]
-                amp_axis = None if None in amp else 0
-                amp = None if None in amp else amp
+        chi2_line = rms_line = chi2_lc = rms_lc= 0.0
 
-                pvmap = vmap(self.generate_synthetic_profile, in_axes=[None, None, rv_axis, amp_axis, 0, None, None])
-                sprf, scale_factors = pvmap(fssc, fssh, rv, amp, cpcs[mode]['coeffs_cube'], mode, jnp)
-                oprf = jnp.array(self.idc[mode]['data_cube'][0])
-                oprf_errs = jnp.array(self.idc[mode]['data_cube'][1])
+        if data_line is not None:
+            if rv_line is None and rv_line_mask is not None:
+                rv_line = x0s[rv_line_mask]
 
-                norm_presiduals = (oprf - sprf) / oprf_errs
-                chisqs[mode] = jnp.sum(norm_presiduals ** 2) / (pnoo * pnop)
-                # std_dev[mode] = jnp.std(oprf - sprf) * 3
-                # mean_err[mode] = jnp.mean(oprf_errs)
+            if amp_line is None and amp_line_mask is not None:
+                amp_line = x0s[amp_line_mask]
 
-                for prow in norm_presiduals:
-                    p_value += self.custom_kstest(prow)[1]
-                    ks_stat += self.custom_kstest(prow)[0]
+            model_line = self.vmap_line(fssc, fssh, coeffs_line, rv_line, vels_line, amp_line)
+            chi2_line, rms_line = self._chi2_rms(data_line, model_line)
 
-                self.conf[mode]['scale_factor'] = scale_factors
+        if data_lc is not None:
+            if amp_lc is None and amp_lc_mask is not None:
+                amp_lc = x0s[amp_lc_mask][0]
 
-            if mode == 'lc':
+            model_lc = self.vmap_lc(fssc, fssh, coeffs_lc, amp_lc)
+            model_lc = model_lc / jnp.mean(model_lc)
+            chi2_lc, rms_lc = self._chi2_rms(data_lc, model_lc)
 
-                lnop = self.idc['lc']['nop']
+        weighted_chi2 = alpha * chi2_line + delta * chi2_lc
+        entropy = self.entropy(fssc, fssh, fssp, norm_grid_areas, fsl)
+        lmbd_entropy = lmbd * entropy
+        cost = weighted_chi2 + lmbd_entropy
 
-                amp = self.conf[mode]['corr']['amp'][0]
-                if isinstance(amp, str) and self.conf[mode]['corr']['amp'] == 'free':
-                    amp = x0s[self.conf[mode]['mask']['amp']]
+        jax_debug.callback(
+            self._print_callback, disp, cost,
+            chi2_line, chi2_lc,
+            alpha * chi2_line, delta * chi2_lc,
+            weighted_chi2, entropy, lmbd_entropy,
+            rms_line, rms_lc, rms_line + rms_lc
+        )
+        return cost
 
-                olc = jnp.array(self.idc[mode]['data_cube'][0])
-                olc_errs = jnp.array(self.idc[mode]['data_cube'][1])
+    def _resolve_corr_param(self, mode, parn, noo, x0s_len, offset):
+        corr = self.conf[mode]['corr'][parn]
 
-                lvmap = vmap(self.generate_synthetic_lightcurve, in_axes=[None, None, 0, None, None])
-                slc = lvmap(fssc, fssh, cpcs['lc']['coeffs_cube'], amp[0], jnp)
+        if corr == 'free':
+            mask = np.zeros(x0s_len, dtype=bool)
+            mask[offset:offset + noo] = True
+            self.conf[mode]['mask'][parn] = mask
+            return None, mask, 0, offset + noo
 
-                scaling = self.conf['lc']['scaling']
-                scale_factor = 1.0
-                if scaling['method'] == 'mean':
-                    scale_factor = jnp.mean(slc)
-                elif scaling['method'] == 'none':
-                    scale_factor = 1.0
-                self.conf['lc']['scale_factor'] = scale_factor
+        if corr is None:
+            self.conf[mode]['corr'][parn] = np.full((noo, 1), None, dtype=object)
+            return None, None, None, offset
 
-                slc /= scale_factor
+        corr = np.atleast_1d(np.asarray(corr))
+        if corr.size == 1:
+            corr = np.full((noo, 1), corr.item())
+        elif corr.ndim == 1:
+            corr = corr[:, None]
 
-                norm_lresiduals = (olc - slc) / olc_errs
-                chisqs['lc'] = jnp.sum(norm_lresiduals ** 2) / lnop
+        self.conf[mode]['corr'][parn] = corr
+        return corr, None, 0, offset
 
-                p_value += self.custom_kstest(norm_lresiduals)[1]
-                ks_stat += self.custom_kstest(norm_lresiduals)[0]
+    def _obj(self, noes, nofp, lmbd, cpcs, alpha, delta, disp):
 
+        norm_grid_areas = jnp.array(self.surface_grid['norm_grid_areas'])
+        x0s_len = 2 * noes + nofp
 
-        alpha_line = alpha * chisqs['line']
-        beta_mol1 = beta * chisqs['mol1']
-        gamma_mol2 = gamma * chisqs['mol2']
-        delta_lc = delta * chisqs['lc']
+        has_line = 'line' in self.conf
+        has_lc = 'lc' in self.conf
 
-        total_weighted_chisq = alpha_line + beta_mol1 + gamma_mol2 + delta_lc
-        # total_std_dev = std_dev['line'] + std_dev['mol1'] + std_dev['mol2'] + std_dev['lc']
-        # total_mean_err = mean_err['line'] + mean_err['mol1'] + mean_err['mol2'] + mean_err['lc']
+        kwargs = {'lmbd': jnp.float64(lmbd)}
+        offset = 2 * noes
 
-        wp = self.surface_grid['grid_areas'] / np.sum(self.surface_grid['grid_areas'])
-        mem = self.entropy(fssc, fssh, fssp, wp)
-        # memmax = self.entropy(jnp.ones(noes) * self.fsu, jnp.ones(noes) * self.fsu, jnp.ones(noes) * self.fsl, wp)
-        lmbd_mem = lmbd * mem  # / memmax
+        rv_line_mask = amp_line_mask = amp_lc_mask = None
 
-        mem2 =  jnp.sum(fssc * wp) + jnp.sum(fssh * wp)
-        lmbd2_mem = lmbd2 * mem2
+        if has_line:
+            noo = self.idc['line']['noo']
+            kwargs['data_line'] = jnp.array(self.idc['line']['data_cube'])
+            kwargs['coeffs_line'] = jnp.array(cpcs['line']['coeffs_cube'])
+            kwargs['alpha'] = jnp.float64(alpha if has_lc else 1.0)
 
-        ftot = total_weighted_chisq + lmbd_mem + lmbd2_mem  # + jnp.abs(total_std_dev - total_mean_err)
+            rv_val, rv_line_mask, rv_axis, offset = self._resolve_corr_param('line', 'rv', noo,
+                                                                             x0s_len, offset)
+            amp_val, amp_line_mask, amp_axis, offset = self._resolve_corr_param('line', 'amp', noo,
+                                                                                x0s_len, offset)
 
-        # spotted_area, _, _, _, _, _ = dipu.get_total_fs(fssc=fssc, fssh=fssh, areas=self.surface_grid['grid_areas'],
-        #                                                 lats=self.surface_grid['grid_lats'], incl=self.params['incl'])
-        #
-        # ftot += jnp.abs(spotted_area - 4.435375 / 100)
+            if rv_val is not None:
+                kwargs['rv_line'] = rv_val
+            if amp_val is not None:
+                kwargs['amp_line'] = amp_val
+            if rv_val is not None or rv_line_mask is not None:
+                kwargs['vels_line'] = self.idc['line']['vels']
 
+            self.vmap_line = jax.vmap(self.generate_synthetic_profile, in_axes=[None, None, 0, rv_axis, None,
+                                                                                amp_axis])
 
-        if self.force_lines_only_map:
-            ftot += jnp.sum(jnp.abs(jnp.hstack((fssc, fssh)) - self.lines_only_map))
-            # ftot += jnp.sum((jnp.hstack((fssc, fssh)) - self.lines_only_map) ** 2)
+        if has_lc:
+            noo = self.idc['lc']['noo']
+            kwargs['data_lc'] = jnp.array(self.idc['lc']['data_cube'])
+            kwargs['coeffs_lc'] = jnp.array(cpcs['lc']['coeffs_cube'])
+            kwargs['delta'] = jnp.float64(delta if has_line else 1.0)
 
-        return ftot, (chisqs['line'], chisqs['mol1'], chisqs['mol2'], chisqs['lc'], alpha_line, beta_mol1, gamma_mol2,
-                      delta_lc, total_weighted_chisq, mem, lmbd_mem, p_value)
+            amp_val, amp_lc_mask, _, offset = self._resolve_corr_param('lc', 'amp', noo, x0s_len, offset)
 
-    def minimize(self, x0s, minx0s, maxx0s, maxiter, tol, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs, disp,
-                 force_lines_only_map):
+            if amp_val is not None:
+                kwargs['amp_lc'] = amp_val[0][0]
 
-        iter_num = 0
-        num_fun_eval = 0
-        self.force_lines_only_map = False
+            self.vmap_lc = jax.vmap(self.generate_synthetic_lightcurve, in_axes=[None, None, 0, None])
+
+        obj = jax.jit(partial(
+            self._objective, noes=noes,
+            rv_line_mask=rv_line_mask, amp_line_mask=amp_line_mask, amp_lc_mask=amp_lc_mask,
+            norm_grid_areas=norm_grid_areas, fsl=self.fsl, disp=disp
+        ))
+
+        return obj, kwargs
+
+    def minimize(self, maxiter, tol, alpha, delta, lmbd, cpcs, initial_map=None, disp=True):
+        noes = self.surface_grid['noes']
+        nofp = self.idc['nofp']
+
+        if initial_map is None:
+            fss = np.full(2 * noes, self.fsl)
+        else:
+            fss = initial_map.copy()
+
+        x0s = jnp.hstack((fss, jnp.zeros(nofp)))
+
+        iter_num = num_fun_eval = 0
+
         if maxiter > 0:
+            self._iter_count = 0
+
+            import time as time_calc
+            start_time = time_calc.time()
+
+            minx0s = jnp.array([self.fsl] * (2 * noes) + [-jnp.inf] * nofp)
+            maxx0s = jnp.array([self.fsu] * (2 * noes) + [jnp.inf] * nofp)
             bounds = jnp.array((minx0s, maxx0s))
 
-            if force_lines_only_map:
-                optimizer = ScipyBoundedMinimize(fun=self.objective_func, has_aux=True, maxiter=maxiter, tol=tol,
-                                                 method='L-BFGS-B', options={'disp': disp})
+            if disp:
+                print(f"\n{'=' * 160}\n{'nFree'} ==> {len(x0s)}\n{'=' * 160}")
 
-                x0s, _ = optimizer.run(x0s, bounds, alpha, 0.0, 0.0, 0.0, lmbd, lmbd2, cpcs)
+            obj, kwargs = self._obj(noes, nofp, lmbd, cpcs, alpha, delta, disp)
 
-                self.lines_only_map = x0s[:2 * self.surface_grid['noes']]
-                self.force_lines_only_map = force_lines_only_map
+            optimizer = ScipyBoundedMinimize(fun=obj, has_aux=False, maxiter=maxiter, tol=tol, method='L-BFGS-B')
+            x0s, res = optimizer.run(x0s, bounds, **kwargs)
 
-            optimizer = ScipyBoundedMinimize(fun=self.objective_func, has_aux=True, maxiter=maxiter, tol=tol,
-                                             method='L-BFGS-B', options={'disp': disp})
+            iter_num, num_fun_eval = res.iter_num, res.num_fun_eval
 
-            x0s, info = optimizer.run(x0s, bounds, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs)
-            x0s = np.array(x0s.copy())
-
-            iter_num = info.iter_num
-            num_fun_eval = info.num_fun_eval
+            print(f"\n{'=' * 170}")
+            print(f"Iterations: {iter_num}, Function evaluations: {num_fun_eval}")
+            print(f"Time taken for optimization: {time_calc.time() - start_time:.2f}s")
+            print(f"{'=' * 170}")
 
         for mode in self.conf:
             for parn in ['rv', 'amp']:
-                if isinstance(self.conf[mode]['corr'][parn], str) and self.conf[mode]['corr'][parn] == 'free':
-                    self.opt_results[mode][parn] = x0s.copy()[self.conf[mode]['mask'][parn]].flatten()
-
-                elif  self.conf[mode]['corr'][parn] is None:
+                corr = self.conf[mode]['corr'][parn]
+                if isinstance(corr, str) and corr == 'free':
+                    self.opt_results[mode][parn] = np.asarray(x0s[self.conf[mode]['mask'][parn]]).flatten()
+                elif corr is None:
                     self.opt_results[mode][parn] = np.array([None] * self.idc[mode]['noo'])
-
                 else:
-                    self.opt_results[mode][parn] = self.conf[mode]['corr'][parn].flatten()
+                    self.opt_results[mode][parn] = np.asarray(corr).flatten()
 
-        fssc = x0s[:self.surface_grid['noes']]
-        fssh = x0s[self.surface_grid['noes']:2 * self.surface_grid['noes']]
-        fssp = 1.0 - (fssc + fssh)
+        fssp, fssc, fssh = self._unpack_surface(x0s, noes)
 
-        ftot, others = self.objective_func(x0s, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs)
+        return np.array(fssp), np.array(fssc), np.array(fssh), iter_num, num_fun_eval
 
-        metrics = np.hstack((others, ftot))
-        for i, item in enumerate(self.opt_stats):
-            self.opt_stats[item] = metrics[i]
+    def _print_callback(self, disp, loss, chi_line, chi_lc, a_line, d_lc, tw_chi, entropy, lmbd_entropy, rms_line, rms_lc,
+                        rms_tot):
+        if disp:
+            self._iter_count += 1
+            print("-" * 170)
+            print(f"{'Func. eval.':^11} | {'loss':^11} | "
+                  f"{'χ²_line':^11} | {'χ²_lc':^11} | {'α·χ²_line':^11} | {'δ·χ²_lc':^11} | "
+                  f"{'Σw·χ²':^11} | {'Entropy':^11} | {'λ·Entropy':^11} | "
+                  f"{'rms_line_res':^11} | {'rms_lc_res':^11} | {'rms_tot_res':^11}")
+            print("-" * 170)
+            print(f"{self._iter_count:^11d} | {loss:^11.6f} | "
+                  f"{chi_line:^11.6f} | {chi_lc:^11.6f} | {a_line:^11.6f} | {d_lc:^11.6f} | "
+                  f"{tw_chi:^11.6f} | {entropy:^11.6f} | {lmbd_entropy:^11.6f} | "
+                  f"{rms_line:^11.6f} | {rms_lc:^11.6f} | {rms_tot:^11.6f}")
 
-        return np.array(fssc), np.array(fssh), np.array(fssp), iter_num, num_fun_eval
+        self.opt_stats['Chi-square for Line Profile(s)'] = chi_line
+        self.opt_stats['Chi-square for Light Curve Profile'] = chi_lc
+        self.opt_stats['Alpha * Line Profile(s) Chi-square'] = a_line
+        self.opt_stats['Delta * Light Curve Profile Chi-square'] = d_lc
+        self.opt_stats['Total Weighted Chi-square'] = tw_chi
+        self.opt_stats['Entropy'] = entropy
+        self.opt_stats['Lambda * Entropy'] = lmbd_entropy
+        self.opt_stats['RMS of Line Residauls'] = rms_line
+        self.opt_stats['RMS of Light Curve Residauls'] = rms_lc
+        self.opt_stats['Total RMS of Residauls'] = rms_tot
+        self.opt_stats['Loss Function Value'] = loss
 
-    def reconstructor(self, alpha=1.0, beta=1.0, gamma=1.0, delta=1.0, lmbd=1.0, lmbd2=0.0, maxiter=100, tol=1e-10,
-                      cpcs=None, initial_map=None, disp=True, force_lines_only_map=False):
+    def reconstructor(self, alpha=1.0, delta=1.0, lmbd=1.0, maxiter=100, tol=1e-10, cpcs=None, initial_map=None,
+                      disp=True):
 
         if not cpcs:
-            cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], mol1_times=self.idc['mol1']['times'],
-                                          mol2_times=self.idc['mol2']['times'], lc_times=self.idc['lc']['times'],
-                                          info=disp)
-        if cpcs and 'lc' not in self.conf:
+            plps = (True, True)
+            if len(self.conf) == 1 and "lc" in self.conf:
+                plps = (False, False)
 
+            import time as time_calc
+            itime_1 = time_calc.time()
+            cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], lc_times=self.idc['lc']['times'],
+                                          info=True, plps=plps)
+            itime_2 = time_calc.time()
+            print(f"Time taken to calculate the surface coefficients: {itime_2 - itime_1} seconds")
+
+        if 'lc' not in self.conf:
             tmin, tmax = [], []
             for mode in self.conf:
                 tmin.append(min(self.idc[mode]['times']))
@@ -1029,29 +973,10 @@ class SpotDIPy:
                                              plps=(False, False), plil=(False, False, False))
 
         if isinstance(lmbd, (list, np.ndarray)):
-            lmbd = self.lambda_search(alpha=alpha, beta=beta, gamma=gamma, delta=delta, lmbds=lmbd, lmbd2=lmbd2,
-                                      maxiter=maxiter, tol=tol, cpcs=cpcs, force_lines_only_map=force_lines_only_map)
+            lmbd = self.lambda_search(alpha=alpha, delta=delta, lmbds=lmbd, maxiter=maxiter, tol=tol, cpcs=cpcs)
 
-        noes = self.surface_grid['noes']
-        if initial_map is None:
-            fss = np.zeros(2 * noes) + self.fsl
-        else:
-            fss = initial_map.copy()
-
-        x0s = jnp.hstack((fss, jnp.zeros(self.idc['nofp'])))
-
-        minx0s = jnp.array([self.fsl] * (2 * noes) + [-jnp.inf] * self.idc['nofp'])
-        maxx0s = jnp.array([self.fsu] * (2 * noes) + [jnp.inf] * self.idc['nofp'])
-
-        if force_lines_only_map:
-            print('\033[96m' + 'WARNING: force_lines_only_map activated. First, the surface map will be computed using '
-                               'only line profiles. Then, this map will be used as a constraint.' + '\033[0m')
-
-
-        rfssc, rfssh, rfssp, nit, nfev = self.minimize(x0s=x0s, minx0s=minx0s, maxx0s=maxx0s, maxiter=maxiter,
-                                                       tol=tol,alpha=alpha, beta=beta, gamma=gamma, delta=delta,
-                                                       lmbd=lmbd, lmbd2=lmbd2, cpcs=cpcs, disp=disp,
-                                                       force_lines_only_map=force_lines_only_map)
+        rfssp, rfssc, rfssh, nit, nfev = self.minimize(maxiter=maxiter, tol=tol, alpha=alpha, delta=delta,
+                                                       lmbd=lmbd, cpcs=cpcs, initial_map=initial_map, disp=disp)
 
         print()
         print('\033[96m' + '*** Optimization Results ***' + '\033[0m')
@@ -1066,9 +991,10 @@ class SpotDIPy:
         for mode in self.conf:
             coeffs_cube = cpcs[mode]['coeffs_cube']
 
-            if mode != 'lc':
+            if mode == 'line':
                 rv = self.opt_results[mode]['rv'].flatten()
                 amp = self.opt_results[mode]['amp'].flatten()
+                vels = self.idc['line']['vels']
 
                 spotless_sprfs = {}
                 recons_sprfs = {}
@@ -1076,11 +1002,11 @@ class SpotDIPy:
                     spotless_sprfs[itime] = {}
                     recons_sprfs[itime] = {}
 
-                    spotless_sprf, _ = self.generate_synthetic_profile(fssc=0.0, fssh=0.0, rv=rv[i], amp=amp[i],
-                                                                       coeffs_cube=coeffs_cube[i], mode=mode)
+                    spotless_sprf = self.generate_synthetic_profile(fssc=0.0, fssh=0.0, rv=rv[i], vels=vels, amp=amp[i],
+                                                                       coeffs_cube=coeffs_cube[i])
 
-                    recons_sprf, _ = self.generate_synthetic_profile(fssc=rfssc, fssh=rfssh, rv=rv[i],
-                                                                     amp=amp[i], coeffs_cube=coeffs_cube[i], mode=mode)
+                    recons_sprf = self.generate_synthetic_profile(fssc=rfssc, fssh=rfssh, rv=rv[i], vels=vels, amp=amp[i],
+                                                                     coeffs_cube=coeffs_cube[i])
 
                     spotless_sprfs[itime]['prf'] = np.array(spotless_sprf)
                     recons_sprfs[itime]['prf'] = np.array(recons_sprf)
@@ -1088,13 +1014,13 @@ class SpotDIPy:
                 self.opt_results[mode]['spotless_sprfs'] = spotless_sprfs
                 self.opt_results[mode]['recons_sprfs'] = recons_sprfs
 
-            if mode == 'lc':
+            else:
                 lc_amp = self.opt_results[mode]['amp'][0]
                 for i, itime in enumerate(self.idc[mode]['times']):
                     flux = self.generate_synthetic_lightcurve(fssc=rfssc, fssh=rfssh, coeffs_cube=coeffs_cube[i],
                                                               amp=lc_amp)
                     recons_slc.append(flux)
-                recons_slc = np.array(recons_slc) / self.conf['lc']['scale_factor']
+                recons_slc = np.array(recons_slc) / np.mean(recons_slc)
 
         if 'lc' not in self.conf:
             for i, itime in enumerate(self.opt_results['lc']['ntimes']):
@@ -1109,8 +1035,6 @@ class SpotDIPy:
                                          lats=self.surface_grid['grid_lats'], incl=self.params['incl'])
 
         self.opt_results['alpha'] = alpha
-        self.opt_results['beta'] = beta
-        self.opt_results['gamma'] = gamma
         self.opt_results['delta'] = delta
         self.opt_results['lmbd'] = lmbd
         self.opt_results['recons_fssc'] = rfssc
@@ -1129,317 +1053,172 @@ class SpotDIPy:
         self.mapprojs = dipu.grid_to_rect_map(surface_grid=self.surface_grid, ints=self.opt_results['ints'],
                                               fssc=rfssc, fssp=rfssp, fssh=rfssh)
 
-    def lambda_search(self, alpha, beta, gamma, delta, lmbds, lmbd2, maxiter, tol, cpcs):
-        global lambda_search_run
+    def lambda_search(self, alpha, delta, lmbds, maxiter, tol, cpcs):
+
+        import tqdm
 
         noes = self.surface_grid['noes']
-        spotless_fss = np.ones(2 * noes) * self.fsl
+        nofp = self.idc['nofp']
+        spotless_fss = np.full(2 * noes, self.fsl)
 
-        minx0s = np.array([self.fsl] * (2 * noes) + [-jnp.inf] * self.idc['nofp'])
-        maxx0s = np.array([self.fsu] * (2 * noes) + [jnp.inf] * self.idc['nofp'])
+        minx0s = jnp.array([self.fsl] * (2 * noes) + [-jnp.inf] * nofp)
+        maxx0s = jnp.array([self.fsu] * (2 * noes) + [jnp.inf] * nofp)
 
-        optimizer = ScipyBoundedMinimize(fun=self.objective_func, has_aux=True, maxiter=maxiter, tol=tol,
-                                         method='L-BFGS-B', options={'disp': False})
+        obj, kwargs = self._obj(noes, nofp, 1.0, cpcs, alpha, delta, False)
+        optimizer = ScipyBoundedMinimize(fun=obj, has_aux=False, maxiter=maxiter, tol=tol, method='L-BFGS-B')
 
-        def lambda_search_run(lmbd):
-            x0s = jnp.hstack((spotless_fss, jnp.zeros(self.idc['nofp'])))
-
+        results = []
+        for lmbd in tqdm.tqdm(lmbds):
+            x0s = jnp.hstack((spotless_fss, jnp.zeros(nofp)))
             bounds = jnp.array((minx0s, maxx0s))
+            kwargs['lmbd'] = jnp.float64(lmbd)
+            _, _ = optimizer.run(x0s, bounds, **kwargs)
+            results.append((self.opt_stats['Total Weighted Chi-square'],
+                             self.opt_stats['Entropy'], lmbd))
 
-            x0s, info = optimizer.run(x0s, bounds, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs)
-
-            _, others = self.objective_func(x0s, alpha, beta, gamma, delta, lmbd, lmbd2, cpcs)
-
-            return others[8], others[9], lmbd
-
-        results = dipu.mp_search(cpu_num=self.cpu_num, input_args=lmbds, func=lambda_search_run)
         parts = np.array(results)
 
         sort = np.argsort(parts[:, 2])
-        self.opt_results['total_wchisqs'] = parts[:, 0][sort]
-        self.opt_results['mems'] = parts[:, 1][sort]
-        self.opt_results['lmbds'] = parts[:, 2][sort]
+        lmbds = parts[:, 2][sort]
+        twchisqs = parts[:, 0][sort]
+        entropies = parts[:, 1][sort]
 
         from kneebow.rotor import Rotor
 
         rotor = Rotor()
-        rotor.fit_rotate(np.vstack((self.opt_results['total_wchisqs'], self.opt_results['mems'])).T)
+        rotor.fit_rotate(np.vstack((twchisqs, entropies)).T)
         maxcurve = rotor.get_elbow_index()
 
+        self.opt_results['lmbds'] = lmbds
+        self.opt_results['twchisqs'] = twchisqs
+        self.opt_results['entropies'] = entropies
         self.opt_results['maxcurve'] = maxcurve
 
-        return self.opt_results['lmbds'][maxcurve]
+        return lmbds[maxcurve]
+
+    # --- Helper: map param name to setter ---
+    def _set_param(self, name, value):
+        """Route a grid-search parameter to the correct config location."""
+        dispatch = {
+            'eqw': lambda v: self.conf['line'].__setitem__('eqw', v),
+            'eqw_phot': lambda v: self.conf['line']['eqw'].__setitem__('phot', v),
+            'eqw_cool': lambda v: self.conf['line']['eqw'].__setitem__('cool', v),
+            'eqw_hot': lambda v: self.conf['line']['eqw'].__setitem__('hot', v),
+            'rv_line': lambda v: self.conf['line']['corr'].__setitem__(
+                'rv', np.full((self.idc['line']['noo'], 1), v)),
+            'amp_line': lambda v: self.conf['line']['corr'].__setitem__(
+                'amp', np.full((self.idc['line']['noo'], 1), v)),
+            'amp_lc': lambda v: self.conf['lc']['corr'].__setitem__(
+                'amp', np.full((self.idc['lc']['noo'], 1), v)),
+        }
+        if name in dispatch:
+            dispatch[name](value)
+        else:
+            self.params[name] = value
 
     def grid_search_run(self, fpmg):
 
-        for j, item in enumerate(self.chisq_grid):
-            if item == 'eqw' and 'line' in self.conf:
-                self.conf['line']['eqw'] = fpmg[j]
-
-            elif item == 'eqw_phot' and 'line' in self.conf:
-                self.conf['line']['eqw']['phot'] = fpmg[j]
-
-            elif item == 'eqw_cool' and 'line' in self.conf:
-                self.conf['line']['eqw']['cool'] = fpmg[j]
-
-            elif item == 'eqw_hot' and 'line' in self.conf:
-                self.conf['line']['eqw']['hot'] = fpmg[j]
-
-            elif item == 'rv_line' and 'line' in self.conf:
-                self.conf['line']['corr']['rv'] = np.array([fpmg[j]] * self.idc['line']['noo'])[:, None]
-
-            elif item == 'amp_line' and 'line' in self.conf:
-                self.conf['line']['corr']['amp'] = np.array([fpmg[j]] * self.idc['line']['noo'])[:, None]
-
-            elif item == 'rv_mol1' and 'mol1' in self.conf:
-                self.conf['mol1']['corr']['rv'] = np.array([fpmg[j]] * self.idc['mol1']['noo'])[:, None]
-
-            elif item == 'rv_mol2' and 'mol2' in self.conf:
-                self.conf['mol2']['corr']['rv'] = np.array([fpmg[j]] * self.idc['mol2']['noo'])[:, None]
-
-            elif item == 'amp_lc' and 'lc' in self.conf:
-                self.conf['lc']['corr']['amp'] = np.array([fpmg[j]] * self.idc['lc']['noo'])[:, None]
-
-            else:
-                self.params[item] = fpmg[j]
-
-        self.construct_surface_grid(method=self.surface_grid['method'], noes=self.surface_grid['init_noes'],
-                                    nlats=self.surface_grid['nlats'], nside=self.surface_grid['nside'],
-                                    info=False)
-
-        # dmask = np.zeros(self.surface_grid['noes'] * 3 + nofp, dtype=bool)
-        dmask = np.zeros(self.surface_grid['noes'] * 2 + self.idc['nofp'], dtype=bool)
-        cmask = dmask.copy()
         for mode in self.conf:
-            noo = self.idc[mode]['noo']
+            self.conf[mode]['corr'] = copy.deepcopy(self._orig_corr[mode])
 
-            for parn in self.conf[mode]['corr']:
-                if isinstance(self.conf[mode]['corr'][parn], str) and self.conf[mode]['corr'][parn] == 'free':
+        for name, value in zip(self.gs_keys, fpmg):
+            self._set_param(name, value)
 
-                    if not cmask.any():
-                        cmask = dmask.copy()
-                        # cmask[3 * self.surface_grid['noes']: 3 * self.surface_grid['noes'] + noo] = True
-                        cmask[2 * self.surface_grid['noes']: 2 * self.surface_grid['noes'] + noo] = True
+        self.construct_surface_grid(
+            method=self.surface_grid['method'], noes=self.surface_grid['init_noes'],
+            nlats=self.surface_grid['nlats'], nside=self.surface_grid['nside'], info=False,
+        )
 
-                    else:
-                        ind = max(np.where(cmask)[0]) + 1
-                        cmask = dmask.copy()
-                        cmask[ind: ind + noo] = True
+        cpcs = self.calc_pixel_coeffs(
+            line_times=self.idc['line']['times'], lc_times=self.idc['lc']['times'],
+            plps=(True, False), plil=(True, False, True), info=False,
+        )
 
-                    self.conf[mode]['mask'][parn] = cmask.copy()
-
-        cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], mol1_times=self.idc['mol1']['times'],
-                                      mol2_times=self.idc['mol2']['times'], lc_times=self.idc['lc']['times'],
-                                      plps=(True, False), plil=(True, False, True), info=False)
-
-        noes = self.surface_grid['noes']
-        fss = np.zeros(2 * noes) + self.fsl
-
-        x0s = jnp.hstack((fss, jnp.zeros(self.idc['nofp'])))
-
-        minx0s = jnp.array([self.fsl] * (2 * noes) + [-jnp.inf] * self.idc['nofp'])
-        maxx0s = jnp.array([self.fsu] * (2 * noes) + [jnp.inf] * self.idc['nofp'])
-
-        self.minimize(x0s=x0s, minx0s=minx0s, maxx0s=maxx0s, maxiter=self.optp_gs['maxiter'], tol=self.optp_gs['tol'],
-                      alpha=self.optp_gs['alpha'], beta=self.optp_gs['beta'], gamma=self.optp_gs['gamma'],
-                      delta=self.optp_gs['delta'], lmbd=self.optp_gs['lmbd'], lmbd2=self.optp_gs['lmbd2'], cpcs=cpcs,
-                      disp=False, force_lines_only_map=self.optp_gs['force_lines_only_map'])
+        self.minimize(
+            maxiter=self.optp_gs['maxiter'], tol=self.optp_gs['tol'],
+            alpha=self.optp_gs['alpha'], delta=self.optp_gs['delta'],
+            lmbd=self.optp_gs['lmbd'], cpcs=cpcs, disp=False,
+        )
 
         if self.info_gs:
             output = self.params.copy()
-            if 'eqw' in self.fp_keys_gs:
-                output['eqw'] = self.conf['line']['eqw']
-            if 'rv_line' in self.fp_keys_gs:
-                output['rv_line'] = self.conf['line']['corr']['rv'][0]
-            if 'amp_line' in self.fp_keys_gs:
-                output['amp_line'] = self.conf['line']['corr']['amp'][0]
-            if 'rv_mol1' in self.fp_keys_gs:
-                output['rv_mol1'] = self.conf['mol1']['corr']['rv'][0]
-            if 'rv_mol2' in self.fp_keys_gs:
-                output['rv_mol2'] = self.conf['mol2']['corr']['rv'][0]
-            if 'amp_lc' in self.fp_keys_gs:
-                output['amp_lc'] = self.conf['lc']['corr']['amp'][0]
+            info_map = {
+                'eqw': ('line', 'eqw', None),
+                'rv_line': ('line', 'corr', 'rv'),
+                'amp_line': ('line', 'corr', 'amp'),
+                'amp_lc': ('lc', 'corr', 'amp'),
+            }
+            for key, (mode, k1, k2) in info_map.items():
+                if key in self.gs_all_keys:
+                    output[key] = self.conf[mode][k1] if k2 is None else self.conf[mode][k1][k2][0]
+
             output['Total Weighted Chi-square'] = self.opt_stats['Total Weighted Chi-square']
             output['Loss Function Value'] = self.opt_stats['Loss Function Value']
 
-            print()
-            print('\033[96m' + '*** Optimization Results ***' + '\033[0m')
-            for out in output:
-                print('\033[93m' + '{:<11}'.format(out) + ':' + '\033[0m', '\033[1m' + str(output[out]) + '\033[0m')
+            print('\n\033[96m*** Optimization Results ***\033[0m')
+            for k, v in output.items():
+                print(f'\033[93m{k:<11}:\033[0m \033[1m{v}\033[0m')
 
-        if self.minv_gs == "chi":
-            return self.opt_stats['Total Weighted Chi-square']
-        elif self.minv_gs == "loss":
-            return self.opt_stats['Loss Function Value']
+        return self.opt_stats['Total Weighted Chi-square'], self.opt_stats['Loss Function Value']
 
     def grid_search(self, fit_params, opt_params=None, info=True, minv="chi", save=False):
-        # global grid_search_run
-
         grid_cpu_num = self.cpu_num
         self.cpu_num = 1
         self.minv_gs = minv
 
-        optp = {'alpha': 1.0, 'beta': 1.0, 'gamma': 1.0, 'delta': 1.0, 'lmbd': 1.0, 'lmbd2': 0.0, 'maxiter': 100,
-                'tol': 1e-5, 'disp': True, 'force_lines_only_map': False}
+        # --- Optimization defaults ---
+        optp = {'alpha': 1.0, 'delta': 1.0, 'lmbd': 1.0, 'maxiter': 100, 'tol': 1e-5, 'disp': True}
         if opt_params is not None:
-            for oitem in opt_params:
-                if oitem in optp:
-                    optp[oitem] = opt_params[oitem]
-                else:
-                    print('\033[93m' + 'Warning: ' + oitem + ' is not a valid parameter for opt_params!' + '\033[0m')
+            invalid = set(opt_params) - set(optp)
+            if invalid:
+                print(f'\033[93mWarning: invalid opt_params keys: {invalid}\033[0m')
+            optp.update({k: v for k, v in opt_params.items() if k in optp})
 
-        if type(optp['lmbd']) in [list, np.ndarray]:
+        if isinstance(optp['lmbd'], (list, np.ndarray)):
             optp['lmbd'] = np.min(optp['lmbd'])
 
-        fp_keys = list(fit_params.keys())
-        for citem in fp_keys:
-            if len(fit_params[citem]) == 1:
-                if citem == 'eqw' and 'line' in self.conf:
-                    self.conf['line']['eqw'] = fit_params[citem][0]
-
-                elif citem == 'eqw_phot':
-                    self.conf['line']['eqw']['phot'] = fit_params[citem][0]
-
-                elif citem == 'eqw_cool':
-                    self.conf['line']['eqw']['cool'] = fit_params[citem][0]
-
-                elif citem == 'eqw_hot':
-                    self.conf['line']['eqw']['hot'] = fit_params[citem][0]
-
-                else:
-                    self.params[citem] = fit_params[citem][0]
-
-                del fit_params[citem]
-
-        fit_params_mg = np.array(np.meshgrid(*list(fit_params.values()))).T.reshape(-1, len(fit_params))
-
-        chisq_grid = {}
-        for i, citem in enumerate(fit_params):
-            chisq_grid[citem] = fit_params_mg[:, i]
-
         self.optp_gs = optp
-        self.fp_keys_gs = fp_keys
+        self.gs_all_keys = list(fit_params.keys())
+
+        # --- Separate single-value params (fixed) from multi-value (grid) ---
+        grid_params = {}
+        for name, values in fit_params.items():
+            if len(values) == 1:
+                self._set_param(name, values[0])
+            else:
+                grid_params[name] = values
+
+        # --- Build meshgrid ---
+        self.gs_keys = list(grid_params.keys())
+        fit_params_mg = np.array(
+            np.meshgrid(*grid_params.values())
+        ).T.reshape(-1, len(grid_params))
+
         self.info_gs = info
-        self.chisq_grid = chisq_grid
 
-        # def grid_search_run(fpmg):
-        #
-        #     for j, item in enumerate(chisq_grid):
-        #         if item == 'eqw' and 'line' in self.conf:
-        #             self.conf['line']['eqw'] = fpmg[j]
-        #
-        #         elif item == 'eqw_phot' and 'line' in self.conf:
-        #             self.conf['line']['eqw']['phot'] = fpmg[j]
-        #
-        #         elif item == 'eqw_cool' and 'line' in self.conf:
-        #             self.conf['line']['eqw']['cool'] = fpmg[j]
-        #
-        #         elif item == 'eqw_hot' and 'line' in self.conf:
-        #             self.conf['line']['eqw']['hot'] = fpmg[j]
-        #
-        #         elif item == 'rv_line' and 'line' in self.conf:
-        #             self.conf['line']['corr']['rv'] = np.array([fpmg[j]] * self.idc['line']['noo'])[:, None]
-        #
-        #         elif item == 'amp_line' and 'line' in self.conf:
-        #             self.conf['line']['corr']['amp'] = np.array([fpmg[j]] * self.idc['line']['noo'])[:, None]
-        #
-        #         elif item == 'rv_mol1' and 'mol1' in self.conf:
-        #             self.conf['mol1']['corr']['rv'] = np.array([fpmg[j]] * self.idc['mol1']['noo'])[:, None]
-        #
-        #         elif item == 'rv_mol2' and 'mol2' in self.conf:
-        #             self.conf['mol2']['corr']['rv'] = np.array([fpmg[j]] * self.idc['mol2']['noo'])[:, None]
-        #
-        #         elif item == 'amp_lc' and 'lc' in self.conf:
-        #             self.conf['lc']['corr']['amp'] = np.array([fpmg[j]] * self.idc['lc']['noo'])[:, None]
-        #
-        #         else:
-        #             self.params[item] = fpmg[j]
-        #
-        #     self.construct_surface_grid(method=self.surface_grid['method'], noes=self.surface_grid['init_noes'],
-        #                                 nlats=self.surface_grid['nlats'], nside=self.surface_grid['nside'],
-        #                                 info=False)
-        #
-        #     # dmask = np.zeros(self.surface_grid['noes'] * 3 + nofp, dtype=bool)
-        #     dmask = np.zeros(self.surface_grid['noes'] * 2 + self.idc['nofp'], dtype=bool)
-        #     cmask = dmask.copy()
-        #     for mode in self.conf:
-        #         noo = self.idc[mode]['noo']
-        #
-        #         for parn in self.conf[mode]['corr']:
-        #             if isinstance(self.conf[mode]['corr'][parn], str) and self.conf[mode]['corr'][parn] == 'free':
-        #
-        #                 if not cmask.any():
-        #                     cmask = dmask.copy()
-        #                     # cmask[3 * self.surface_grid['noes']: 3 * self.surface_grid['noes'] + noo] = True
-        #                     cmask[2 * self.surface_grid['noes']: 2 * self.surface_grid['noes'] + noo] = True
-        #
-        #                 else:
-        #                     ind = max(np.where(cmask)[0]) + 1
-        #                     cmask = dmask.copy()
-        #                     cmask[ind: ind + noo] = True
-        #
-        #                 self.conf[mode]['mask'][parn] = cmask.copy()
-        #
-        #     cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], mol1_times=self.idc['mol1']['times'],
-        #                                   mol2_times=self.idc['mol2']['times'], lc_times=self.idc['lc']['times'],
-        #                                   plps=(True, False), plil=(True, False, True), info=False)
-        #
-        #     noes = self.surface_grid['noes']
-        #     fss = np.zeros(2 * noes) + self.fsl
-        #
-        #     x0s = jnp.hstack((fss, jnp.zeros(self.idc['nofp'])))
-        #
-        #     minx0s = jnp.array([self.fsl] * (2 * noes) + [-jnp.inf] * self.idc['nofp'])
-        #     maxx0s = jnp.array([self.fsu] * (2 * noes) + [jnp.inf] * self.idc['nofp'])
-        #
-        #     self.minimize(x0s=x0s, minx0s=minx0s, maxx0s=maxx0s, maxiter=optp['maxiter'], tol=optp['tol'],
-        #                   alpha=optp['alpha'], beta=optp['beta'], gamma=optp['gamma'], delta=optp['delta'],
-        #                   lmbd=optp['lmbd'], lmbd2=optp['lmbd2'], cpcs=cpcs, disp=False)
-        #
-        #     if info:
-        #         output = self.params.copy()
-        #         if 'eqw' in fp_keys:
-        #             output['eqw'] = self.conf['line']['eqw']
-        #         if 'rv_line' in fp_keys:
-        #             output['rv_line'] = self.conf['line']['corr']['rv'][0]
-        #         if 'amp_line' in fp_keys:
-        #             output['amp_line'] = self.conf['line']['corr']['amp'][0]
-        #         if 'rv_mol1' in fp_keys:
-        #             output['rv_mol1'] = self.conf['mol1']['corr']['rv'][0]
-        #         if 'rv_mol2' in fp_keys:
-        #             output['rv_mol2'] = self.conf['mol2']['corr']['rv'][0]
-        #         if 'amp_lc' in fp_keys:
-        #             output['amp_lc'] = self.conf['lc']['corr']['amp'][0]
-        #         output['Total Weighted Chi-square'] = self.opt_stats['Total Weighted Chi-square']
-        #         output['Loss Function Value'] = self.opt_stats['Loss Function Value']
-        #
-        #         print()
-        #         print('\033[96m' + '*** Optimization Results ***' + '\033[0m')
-        #         for out in output:
-        #             print('\033[93m' + '{:<11}'.format(out) + ':' + '\033[0m', '\033[1m' + str(output[out]) + '\033[0m')
-        #
-        #     # return self.opt_stats['Loss Function Value']
-        #     return self.opt_stats['Total Weighted Chi-square']
+        self._orig_corr = {mode: copy.deepcopy(self.conf[mode]['corr']) for mode in self.conf}
 
-        chisqs = dipu.mp_search(cpu_num=grid_cpu_num, func=self.grid_search_run, input_args=fit_params_mg)
-        chisq_grid['chisqs'] = np.array(chisqs)
+        stats = dipu.mp_search(cpu_num=grid_cpu_num, func=self.grid_search_run, input_args=fit_params_mg,
+                               backend=self.platform_name)
+
+        # --- Collect results ---
+        stats_grid = {name: fit_params_mg[:, i] for i, name in enumerate(self.gs_keys)}
+        stats_grid['stats'] = np.array(stats)
+        stats_grid['fit_params'] = fit_params
 
         self.cpu_num = grid_cpu_num
 
         if save:
-            file = open(save, 'wb')
-            pickle.dump(chisq_grid, file)
-            file.close()
+            with open(save, 'wb') as f:
+                pickle.dump(stats_grid, f)
 
-        # print(chisq_grid)
-
-        dipu.make_grid_contours(chisq_grid, minv)
+        dipu.make_grid_contours(stats_grid, minv)
 
     def plot(self, plot_params=None):
 
         plotp = {'line_sep_prf': 0.4, 'line_sep_res': 0.01, 'mol_sep_prf': 0.4, 'mol_sep_res': 0.01,
-                 'show_err_bars': True, 'fmt': '%0.3f',
-                 'markersize': 2, 'linewidth': 1, 'fontsize': 15, 'ticklabelsize': 12}
+                 'show_err_bars': True, 'fmt': '%0.3f', 'markersize': 2, 'linewidth': 1, 'fontsize': 15,
+                 'ticklabelsize': 12}
         if plot_params is not None:
             for pitem in plot_params:
                 if pitem in plotp:
@@ -1459,14 +1238,13 @@ class SpotDIPy:
 
         sys.exit(app.exec_())
 
-    def test(self, modes_input, artificial_map=None, spots_params=None, opt_params=None, plot_params=None, save_data_path=None):
+    def test(self, modes_input, artificial_map=None, spots_params=None, opt_params=None, plot_params=None,
+             seed=None, initial_map=False, save_data_path=None, plot=True):
 
-        # import time
-        # start = time.time()
 
-        plotp = {'line_sep_prf': 0.03, 'line_sep_res': 0.01, 'mol_sep_prf': 0.03, 'mol_sep_res': 0.01,
-                 'show_err_bars': True, 'fmt': '%0.3f', 'markersize': 2, 'linewidth': 1, 'fontsize': 15,
-                 'ticklabelsize': 12}
+        plotp = {'map_projection': 'rectangular', 'line_sep_prf': 0.03, 'line_sep_res': 0.01, 'mol_sep_prf': 0.03,
+                 'mol_sep_res': 0.01, 'show_err_bars': True, 'fmt': '%0.3f', 'markersize': 2, 'linewidth': 1,
+                 'fontsize': 15, 'ticklabelsize': 12, 'fill_color': 'yellow', 'cmap': 'gray'}
         if plot_params is not None:
             for pitem in plot_params:
                 if pitem in plotp:
@@ -1474,8 +1252,7 @@ class SpotDIPy:
                 else:
                     print('\033[93m' + 'Warning: ' + pitem + ' is not a valid parameter for plot_params!' + '\033[0m')
 
-        optp = {'alpha': 1.0, 'beta': 1.0, 'gamma': 1.0, 'delta': 1.0, 'lmbd': 1.0, 'maxiter': 100, 'tol': 1e-10,
-                'disp': True}
+        optp = {'alpha': 1.0, 'delta': 1.0, 'lmbd': 1.0, 'maxiter': 100, 'tol': 1e-10, 'disp': True}
         if opt_params is not None:
             for oitem in opt_params:
                 if oitem in optp:
@@ -1501,10 +1278,13 @@ class SpotDIPy:
             noes = self.surface_grid['noes']
             fake_fssc, fake_fssh = artificial_map[:noes], artificial_map[noes:2 * noes]
 
-        cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], mol1_times=self.idc['mol1']['times'],
-                                      mol2_times=self.idc['mol2']['times'], lc_times=self.idc['lc']['times'], info=True)
+        import time as time_calc
+        itime_1 = time_calc.time()
+        cpcs = self.calc_pixel_coeffs(line_times=self.idc['line']['times'], lc_times=self.idc['lc']['times'], info=True)
+        itime_2 = time_calc.time()
+        print(f"Time taken to calculate the surface coefficients: {itime_2 - itime_1} seconds")
 
-        np.random.seed(0)
+        np.random.seed(seed)
         for mode, mitem in self.conf.items():
             if isinstance(mitem['corr']['rv'], (tuple, list, np.ndarray)):
                 rvs = mitem['corr']['rv']
@@ -1524,26 +1304,16 @@ class SpotDIPy:
             else:
                 amps = [mitem['corr']['amp']] * self.idc[mode]['noo']
 
-            if mode != 'lc':
+            if mode == 'line':
                 fake_sprfs = {}
+                vels = self.idc['line']['vels']
                 for i, itime in enumerate(self.idc[mode]['times']):
-                    sprf, _ = self.generate_synthetic_profile(fssc=fake_fssc, fssh=fake_fssh, rv=rvs[i], amp=amps[i],
-                                                              coeffs_cube=cpcs[mode]['coeffs_cube'][i], mode=mode,
-                                                              lib=np)
+                    sprf = self.generate_synthetic_profile(fssc=fake_fssc, fssh=fake_fssh, rv=rvs[i], vels=vels,
+                                                              amp=amps[i], coeffs_cube=cpcs[mode]['coeffs_cube'][i])
 
-                    # same_random_line_err = np.random.normal(0.0, np.mean(sprf) / self.idc[mode]['snr'],
-                    #                                         self.idc[mode]['nop'])
-                    # same_random_line_err = np.random.normal(0.0, 1.0 / self.idc[mode]['snr'],
-                    #                                         self.idc[mode]['nop'])
+                    fprf, fperr = dipu.generate_noisy_normalized_profile(model=sprf, snr=self.idc[mode]['snr'],
+                                                                         read_noise=self.idc[mode]['read_noise'])
 
-                    same_random_line_err = np.random.uniform(-1 / self.idc[mode]['snr'], 1 / self.idc[mode]['snr'],
-                                                            self.idc[mode]['nop'])
-
-                    fprf = sprf + same_random_line_err
-                    # fperr = 2.0 * np.ones(self.idc[mode]['nop']) * (np.mean(sprf) / self.idc[mode]['snr'])
-                    # fperr = np.ones(self.idc[mode]['nop']) / self.idc[mode]['snr']
-                    fperr = fprf / self.idc[mode]['snr']
-                    # fperr = fprf / self.idc[mode]['snr'] * 2
                     self.idc[mode]['data'].append(np.vstack((self.idc[mode]['vels'], fprf, fperr)).T)
 
                     fake_sprfs[itime] = {}
@@ -1555,23 +1325,13 @@ class SpotDIPy:
                 slc = np.zeros(self.idc[mode]['nop'])
                 for i, itime in enumerate(self.idc[mode]['times']):
                     flux = self.generate_synthetic_lightcurve(fssc=fake_fssc, fssh=fake_fssh,
-                                                              coeffs_cube=cpcs[mode]['coeffs_cube'][i],
-                                                              amp=amps[0], lib=np)
+                                                              coeffs_cube=cpcs[mode]['coeffs_cube'][i], amp=amps[0])
 
                     slc[i] = flux
 
-                slc /= self.conf['lc']['scale_factor']
-
-                # same_random_lc_err = np.random.normal(0.0, np.mean(slc) / self.idc[mode]['snr'], self.idc[mode]['nop'])
-                # same_random_lc_err = np.random.normal(0.0, 1.0 / self.idc[mode]['snr'], self.idc[mode]['nop'])
-                same_random_lc_err = np.random.uniform(-np.mean(slc) / self.idc[mode]['snr'], np.mean(slc) / self.idc[mode]['snr'],
-                                                      self.idc[mode]['nop'])
-
-                flc = slc + same_random_lc_err
-
-                # flerr = 1.0 * np.ones(self.idc[mode]['nop']) * (np.mean(slc) / self.idc[mode]['snr'])
-                # flerr = np.mean(slc) * np.ones(self.idc[mode]['nop']) / self.idc[mode]['snr']
-                flerr = flc / self.idc[mode]['snr']
+                slc /= np.mean(slc)
+                flc, flerr = dipu.generate_noisy_normalized_profile(model=slc, snr=self.idc[mode]['snr'],
+                                                                    read_noise=self.idc[mode]['read_noise'])
 
                 self.idc[mode]['data'] = np.vstack((flc, flerr)).T
 
@@ -1582,12 +1342,13 @@ class SpotDIPy:
 
         self.set_input_data()
 
-        # print(start - time.time())
-        # dadasd
+        if initial_map:
+            initial_map = np.hstack((fake_fssc, fake_fssh))
+        else:
+            initial_map = None
 
-        self.reconstructor(alpha=optp['alpha'], beta=optp['beta'], gamma=optp['gamma'], delta=optp['delta'],
-                           lmbd=optp['lmbd'], maxiter=optp['maxiter'], tol=optp['tol'], disp=optp['disp'],
-                           cpcs=cpcs)
+        self.reconstructor(alpha=optp['alpha'], delta=optp['delta'], lmbd=optp['lmbd'], maxiter=optp['maxiter'],
+                           tol=optp['tol'], disp=optp['disp'], cpcs=cpcs, initial_map=initial_map)
 
         fake_total_fs = dipu.get_total_fs(fssc=fake_fssc, fssh=fake_fssh, areas=self.surface_grid['grid_areas'],
                                           lats=self.surface_grid['grid_lats'], incl=self.params['incl'])
@@ -1595,19 +1356,20 @@ class SpotDIPy:
                                             areas=self.surface_grid['grid_areas'], lats=self.surface_grid['grid_lats'],
                                             incl=self.params['incl'])
 
-        for mode in self.conf:
-            if mode != 'lc':
-                dipu.test_prf_plot(DIP=self, mode=mode, plotp=plotp)
+        if plot:
+            for mode in self.conf:
+                if mode != 'lc':
+                    dipu.test_prf_plot(DIP=self, mode=mode, plotp=plotp)
 
-        dipu.test_lc_plot(DIP=self, plotp=plotp)
+            dipu.test_lc_plot(DIP=self, plotp=plotp)
 
-        dipu.test_map_plot(DIP=self, fake_fssc=fake_fssc, fake_fssh=fake_fssh, fake_total_fs=fake_total_fs,
-                           recons_total_fs=recons_total_fs, plotp=plotp)
+            dipu.test_map_plot(DIP=self, fake_fssc=fake_fssc, fake_fssh=fake_fssh, fake_total_fs=fake_total_fs,
+                               recons_total_fs=recons_total_fs, plotp=plotp)
 
-        if len(self.opt_results['lmbds']) > 0:
-            dipu.lmbds_plot(DIP=self, plotp=plotp)
+            if len(self.opt_results['lmbds']) > 0:
+                dipu.lmbds_plot(DIP=self, plotp=plotp)
 
-        plt.show()
+            plt.show()
 
     def save_obs_model_data(self, path):
 
