@@ -7,14 +7,6 @@ by simultaneously modeling both spectral and light curve data using three-temper
 
 # Installation
 
-SpotDIPy can be installed easily via pip. To install the latest version, run the following commands.
-It is recommended to install SpotDIPy within a Python virtual environment.
-    
-    pip install mayavi
-    pip install spotdipy
-
-or
-
 After downloading SpotDIPy, extract the ZIP file. Then, navigate to 
 the SpotDIPy-main directory and run the following commands:
 
