@@ -276,6 +276,23 @@ If you use SpotDIPy in your research, please cite the following reference:
           adsnote = {Provided by the SAO/NASA Astrophysics Data System}
     }
 
+    @ARTICLE{2026A&A...707A..24L,
+           author = {{Lee}, S. and {Bahar}, E. and {{\c{S}}enavc{\i}}, H.~V. and {I{\textcommabelow s}{\i}k}, E. and {Ikuta}, K. and {Namekata}, K. and {Nagata}, H. and {Kawauchi}, K. and {Omiya}, M. and {Izumiura}, H. and {Tajitsu}, A. and {Sato}, B. and {Honda}, S. and {Nogami}, D.},
+            title = "{Doppler imaging combined with high-cadence photometry: I. Revisiting the surface of a pre-main-sequence flare star PW Andromedae}",
+          journal = {\aap},
+         keywords = {stars: activity, stars: flare, stars: imaging, stars: individual: PW Andromedae, starspots, Solar and Stellar Astrophysics},
+             year = 2026,
+            month = mar,
+           volume = {707},
+              eid = {A24},
+            pages = {A24},
+              doi = {10.1051/0004-6361/202556616},
+    archivePrefix = {arXiv},
+           eprint = {2511.12190},
+     primaryClass = {astro-ph.SR},
+           adsurl = {https://ui.adsabs.harvard.edu/abs/2026A&A...707A..24L},
+          adsnote = {Provided by the SAO/NASA Astrophysics Data System}
+    }
 Your citation would be greatly appreciated and help support the development of this code.
 
 [//]: # (<p align="center">)
