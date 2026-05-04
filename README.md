@@ -81,6 +81,12 @@ containing the synths_lsds, target_lc, and target_lsds directories. The content 
     
     # R: Stellar radius in solar radii. As mentioned above, only use 'R' if you haven't set 'vsini'.
     # DIP.set_param('R', value=0.770)
+
+    # gd_beta: Gravity darkening exponent. If set to a float, the classical relation
+    # (T ~ g^beta) is used; typical values are ~0.08 for convective envelopes and
+    # ~0.25 for radiative envelopes. If set to None, the Espinosa Lara & Rieutord (2011)
+    # prescription is adopted, appropriate for stars with radiative outer layers.
+    DIP.set_param('gd_beta', value=0.08)
     
     # vrt: Radial-tangential macroturbulence velocity in km/s. This parameter accounts for the
     # broadening of spectral lines due to large-scale convective motions in the stellar atmosphere.
